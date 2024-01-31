@@ -51,13 +51,15 @@ use crate::{
     opts::Opts,
     process::ProcessManager,
     run::{
-        global_hash::get_global_hash_inputs, package_discovery::DaemonPackageDiscovery,
+        global_hash::get_global_hash_inputs,
+        package_discovery::DaemonPackageDiscovery,
+        package_hashes::{DaemonPackageHasher, FallbackPackageHasher, PackageHasher},
         summary::RunTracker,
     },
     shim::TurboState,
     signal::{SignalHandler, SignalSubscriber},
     task_graph::Visitor,
-    task_hash::{get_external_deps_hash, PackageInputsHashes},
+    task_hash::get_external_deps_hash,
     turbo_json::TurboJson,
 };
 
@@ -370,22 +372,46 @@ impl Run {
         let root_external_dependencies_hash =
             is_monorepo.then(|| get_external_deps_hash(&root_workspace.transitive_dependencies));
 
-        let local_package_hasher = package_hashes::LocalPackageHashes::new(
-            opts.run_opts.env_mode,
-            opts.run_opts.framework_inference,
-            scm,
+        let mut global_hash_inputs = get_global_hash_inputs(
+            root_external_dependencies_hash.as_deref(),
+            &self.base.repo_root,
+            pkg_dep_graph.package_manager(),
+            pkg_dep_graph.lockfile(),
+            &root_turbo_json.global_deps,
+            &env_at_execution_start,
+            &root_turbo_json.global_env,
+            root_turbo_json.global_pass_through_env.as_deref(),
+            self.opts.run_opts.env_mode,
+            self.opts.run_opts.framework_inference,
+            root_turbo_json.global_dot_env.as_deref(),
+        )?;
+
+        let global_hash = global_hash_inputs.calculate_global_hash_from_inputs();
+        debug!("global hash: {}", global_hash);
+
+        // if we are forcing the daemon, we don't want to fallback to local discovery
+        let (fallback, duration) = if let Some(true) = self.opts.run_opts.daemon {
+            (None, Duration::MAX)
+        } else {
+            (
+                Some(package_hashes::LocalPackageHashes::new(
+                    scm,
+                    &pkg_dep_graph,
+                    &engine,
+                    &self.base.repo_root,
+                )),
+                Duration::from_millis(10),
+            )
+        };
+
+        let mut package_hasher = FallbackPackageHasher::new(
+            daemon.as_mut().map(DaemonPackageHasher::new),
+            fallback,
+            duration,
         );
 
-        let workspace_hashes = local_package_hasher
-            .calculate_workspaces(
-                root_external_dependencies_hash.as_deref(),
-                &pkg_dep_graph,
-                &self.base.repo_root,
-                &root_turbo_json,
-                &env_at_execution_start,
-                &engine,
-                run_telemetry.clone(),
-            )
+        let workspace_hashes = package_hasher
+            .calculate_workspaces(run_telemetry.clone())
             .await?;
 
         let color_selector = ColorSelector::default();
@@ -416,7 +442,7 @@ impl Run {
             global_env_mode = EnvMode::Strict;
         }
 
-        if opts.run_opts.parallel {
+        if self.opts.run_opts.parallel {
             pkg_dep_graph.remove_workspace_dependencies();
             engine = self.build_engine(&pkg_dep_graph, &root_turbo_json, &filtered_pkgs)?;
         }
@@ -437,14 +463,9 @@ impl Run {
 
         let global_env = {
             let mut env = env_at_execution_start
-                .from_wildcards(
-                    workspace_hashes
-                        .global_inputs
-                        .pass_through_env
-                        .unwrap_or_default(),
-                )
+                .from_wildcards(global_hash_inputs.pass_through_env.unwrap_or_default())
                 .map_err(Error::Env)?;
-            if let Some(resolved_global) = &workspace_hashes.global_inputs.resolved_env_vars {
+            if let Some(resolved_global) = &global_hash_inputs.resolved_env_vars {
                 env.union(&resolved_global.all);
             }
             env
@@ -468,10 +489,10 @@ impl Run {
             pkg_dep_graph.clone(),
             runcache,
             run_tracker,
-            &opts,
+            &self.opts.run_opts,
             workspace_hashes.package_inputs,
             &env_at_execution_start,
-            &workspace_hashes.global_hash,
+            &global_hash,
             global_env_mode,
             self.base.ui,
             false,
@@ -510,7 +531,7 @@ impl Run {
             .finish(
                 exit_code,
                 filtered_pkgs,
-                workspace_hashes.global_inputs,
+                global_hash_inputs,
                 &engine,
                 &env_at_execution_start,
                 self.opts.scope_opts.pkg_inference_root.as_deref(),

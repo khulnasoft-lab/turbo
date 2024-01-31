@@ -34,6 +34,8 @@ pub enum Error {
     #[error(transparent)]
     DaemonConnector(#[from] daemon::DaemonConnectorError),
     #[error(transparent)]
+    Daemon(#[from] daemon::DaemonError),
+    #[error(transparent)]
     Cache(#[from] turborepo_cache::CacheError),
     #[error(transparent)]
     Path(#[from] turbopath::PathError),
@@ -47,4 +49,6 @@ pub enum Error {
     Visitor(#[from] task_graph::VisitorError),
     #[error("error registering signal handler: {0}")]
     SignalHandler(std::io::Error),
+    #[error("package hashing unavailable")]
+    PackageHashingUnavailable,
 }

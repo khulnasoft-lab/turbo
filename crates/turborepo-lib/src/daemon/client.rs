@@ -131,6 +131,18 @@ impl<T> DaemonClient<T> {
 
         Ok(response)
     }
+
+    pub async fn discover_package_hashes(
+        &mut self,
+    ) -> Result<Vec<proto::PackageHash>, DaemonError> {
+        let response = self
+            .client
+            .discover_package_hashes(proto::DiscoverPackageHashesRequest {})
+            .await?
+            .into_inner();
+
+        Ok(response.package_hashes)
+    }
 }
 
 impl DaemonClient<DaemonConnector> {

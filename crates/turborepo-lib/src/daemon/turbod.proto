@@ -16,6 +16,13 @@ service Turbod {
   //
   // Since 1.11.0
   rpc DiscoverPackages (DiscoverPackagesRequest) returns (DiscoverPackagesResponse);
+
+  // Get the package hashes for all the packages the daemon is aware of.
+  //
+  // Since 1.12.0
+  rpc DiscoverPackageHashes (DiscoverPackageHashesRequest) returns (DiscoverPackageHashesResponse);
+
+  rpc SubscribePackageHashes (DiscoverPackageHashesRequest) returns (stream DiscoverPackageHashesResponse);
 }
 
 message HelloRequest {
@@ -91,7 +98,6 @@ message DiscoverPackagesResponse {
 message PackageFiles {
   string package_json = 1;
   optional string turbo_json = 2;
-
 }
 
 enum PackageManager {
@@ -101,4 +107,19 @@ enum PackageManager {
   Pnpm6 = 3;
   Yarn = 4;
   Bun = 5;
+}
+
+message DiscoverPackageHashesRequest {
+
+}
+
+message DiscoverPackageHashesResponse {
+  repeated PackageHash package_hashes = 1;
+}
+
+
+message PackageHash {
+  string package = 1;
+  string task = 2;
+  string hash = 3;
 }
