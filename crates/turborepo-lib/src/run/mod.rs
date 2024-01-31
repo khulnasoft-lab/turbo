@@ -396,9 +396,13 @@ impl Run {
             (
                 Some(package_hashes::LocalPackageHashes::new(
                     scm,
-                    &pkg_dep_graph,
-                    &engine,
-                    &self.base.repo_root,
+                    pkg_dep_graph
+                        .workspaces()
+                        .map(|(name, info)| (name.to_owned(), info.to_owned()))
+                        .collect(),
+                    engine.tasks().cloned(),
+                    engine.task_definitions().to_owned(),
+                    self.base.repo_root.clone(),
                 )),
                 Duration::from_millis(10),
             )

@@ -38,7 +38,7 @@ enum WaitError {
 
 impl<PD, PH: PackageHasher> WatchingPackageHasher<PD, PH> {
     pub async fn new(
-        discovery: Arc<Mutex<PD>>,
+        package_discovery: Arc<Mutex<PD>>,
         mut fallback: PH,
         interval: Duration,
         watcher_rx: watch::Receiver<Option<Arc<FileWatching>>>,
@@ -51,8 +51,8 @@ impl<PD, PH: PackageHasher> WatchingPackageHasher<PD, PH> {
                 .hashes,
         ));
 
-        /// listen to updates from the file watcher and update the map
-        let subscriber = tokio::task::spawn({
+        // listen to updates from the file watcher and update the map
+        let _subscriber = tokio::task::spawn({
             let watcher_rx = watcher_rx.clone();
             let map = map.clone();
             async move {
@@ -72,7 +72,7 @@ impl<PD, PH: PackageHasher> WatchingPackageHasher<PD, PH> {
 
         Self {
             interval,
-            package_discovery: discovery,
+            package_discovery,
             fallback,
             map,
             watcher_rx,
@@ -95,7 +95,7 @@ impl<PD: PackageDiscovery + Send, PH: PackageHasher + Send> PackageHasher
 {
     async fn calculate_hashes(
         &mut self,
-        run_telemetry: GenericEventBuilder,
+        _run_telemetry: GenericEventBuilder,
     ) -> Result<PackageInputsHashes, Error> {
         let data = self.map.lock().await;
         Ok(PackageInputsHashes {

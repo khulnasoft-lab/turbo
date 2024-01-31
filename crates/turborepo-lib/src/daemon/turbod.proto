@@ -115,6 +115,7 @@ message DiscoverPackageHashesRequest {
 
 message DiscoverPackageHashesResponse {
   repeated PackageHash package_hashes = 1;
+  repeated FileHash file_hashes = 2;
 }
 
 
@@ -122,4 +123,13 @@ message PackageHash {
   string package = 1;
   string task = 2;
   string hash = 3;
+  // the relative path of file inputs for the package task
+  repeated string inputs = 4;
+}
+
+message FileHash {
+  // the repo-root-relative unix-formatted path of the file
+  string relative_path = 1;
+  // the hash of that file
+  string hash = 2;
 }

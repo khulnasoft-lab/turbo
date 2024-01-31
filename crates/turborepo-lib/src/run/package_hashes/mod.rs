@@ -1,17 +1,18 @@
 pub mod watch;
 
-use rayon::iter::ParallelBridge;
-use tokio::sync::Mutex;
-use turbopath::AbsoluteSystemPath;
-use turborepo_repository::{
-    discovery::{DiscoveryResponse, PackageDiscovery},
-    package_graph::PackageGraph,
-};
+use std::collections::HashMap;
+
+use rayon::prelude::*;
+use turbopath::{AbsoluteSystemPathBuf, RelativeUnixPathBuf};
+use turborepo_repository::package_graph::{WorkspaceInfo, WorkspaceName};
 use turborepo_scm::SCM;
 use turborepo_telemetry::events::generic::GenericEventBuilder;
 
 use super::task_id::TaskId;
-use crate::{engine::Engine, run::error::Error, task_hash::PackageInputsHashes, DaemonClient};
+use crate::{
+    engine::TaskNode, hash::FileHashes, run::error::Error, task_graph::TaskDefinition,
+    task_hash::PackageInputsHashes, DaemonClient,
+};
 
 pub trait PackageHasher {
     fn calculate_hashes(
@@ -20,41 +21,52 @@ pub trait PackageHasher {
     ) -> impl std::future::Future<Output = Result<PackageInputsHashes, Error>> + Send;
 }
 
-pub struct LocalPackageHashes<'a> {
+pub struct LocalPackageHashes {
     scm: SCM,
-    pkg_dep_graph: &'a PackageGraph,
-    engine: &'a Engine,
-    repo_root: &'a AbsoluteSystemPath,
+    workspaces: HashMap<WorkspaceName, WorkspaceInfo>,
+    tasks: Vec<TaskNode>,
+    task_definitions: HashMap<TaskId<'static>, TaskDefinition>,
+    repo_root: AbsoluteSystemPathBuf,
 }
 
-impl<'a> LocalPackageHashes<'a> {
+impl LocalPackageHashes {
     pub fn new(
         scm: SCM,
-        pkg_dep_graph: &'a PackageGraph,
-        engine: &'a Engine,
-        repo_root: &'a AbsoluteSystemPath,
+        workspaces: HashMap<WorkspaceName, WorkspaceInfo>,
+        tasks: impl Iterator<Item = TaskNode>,
+        task_definitions: HashMap<TaskId<'static>, TaskDefinition>,
+        repo_root: AbsoluteSystemPathBuf,
     ) -> Self {
+        let tasks: Vec<_> = tasks.collect();
+        tracing::debug!(
+            "creating new local package hasher with {} tasks and {} definitions across {} \
+             workspaces",
+            tasks.len(),
+            task_definitions.len(),
+            workspaces.len()
+        );
         Self {
             scm,
-            pkg_dep_graph,
-            engine,
+            workspaces,
+            tasks,
+            task_definitions,
             repo_root,
         }
     }
 }
 
-impl<'a> PackageHasher for LocalPackageHashes<'a> {
+impl PackageHasher for LocalPackageHashes {
     async fn calculate_hashes(
         &mut self,
         run_telemetry: GenericEventBuilder,
     ) -> Result<PackageInputsHashes, Error> {
-        let workspaces = self.pkg_dep_graph.workspaces().collect();
+        tracing::debug!("running local package hash discovery in {}", self.repo_root);
         let package_inputs_hashes = PackageInputsHashes::calculate_file_hashes(
             &self.scm,
-            self.engine.tasks().par_bridge(),
-            workspaces,
-            self.engine.task_definitions(),
-            self.repo_root,
+            self.tasks.par_iter(),
+            &self.workspaces,
+            &self.task_definitions,
+            &self.repo_root,
             &run_telemetry,
         )?;
         Ok(package_inputs_hashes)
@@ -73,12 +85,43 @@ impl<'a, C: Clone + Send> PackageHasher for DaemonPackageHasher<'a, C> {
         let package_hashes = self.daemon.discover_package_hashes().await;
 
         package_hashes
-            .map(|resp| PackageInputsHashes {
-                hashes: resp
+            .map(|resp| {
+                let mapping: HashMap<_, _> = resp
+                    .file_hashes
                     .into_iter()
-                    .map(|f| (TaskId::new(&f.package, &f.task).into_owned(), f.hash))
-                    .collect(),
-                ..Default::default()
+                    .map(|fh| (fh.relative_path, fh.hash))
+                    .collect();
+
+                let (expanded_hashes, hashes) = resp
+                    .package_hashes
+                    .into_iter()
+                    .map(|ph| {
+                        (
+                            (
+                                TaskId::new(&ph.package, &ph.task).into_owned(),
+                                FileHashes(
+                                    ph.inputs
+                                        .into_iter()
+                                        .filter_map(|f| {
+                                            mapping.get(&f).map(|hash| {
+                                                (
+                                                    RelativeUnixPathBuf::new(f).unwrap(),
+                                                    hash.to_owned(),
+                                                )
+                                            })
+                                        })
+                                        .collect(),
+                                ),
+                            ),
+                            (TaskId::from_owned(ph.package, ph.task), ph.hash),
+                        )
+                    })
+                    .unzip();
+
+                PackageInputsHashes {
+                    expanded_hashes,
+                    hashes,
+                }
             })
             .map_err(Error::Daemon)
     }

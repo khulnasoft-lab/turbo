@@ -22,6 +22,7 @@ use std::{
 };
 
 use futures::{stream, Future, Stream};
+use itertools::Itertools;
 use semver::Version;
 use thiserror::Error;
 use tokio::{
@@ -31,7 +32,7 @@ use tokio::{
 use tonic::transport::{NamedService, Server};
 use tower::ServiceBuilder;
 use tracing::{error, info, trace, warn};
-use turbopath::{AbsoluteSystemPath, AbsoluteSystemPathBuf};
+use turbopath::{AbsoluteSystemPath, AbsoluteSystemPathBuf, AnchoredSystemPath};
 use turborepo_filewatch::{
     cookie_jar::CookieJar,
     globwatcher::{Error as GlobWatcherError, GlobError, GlobSet, GlobWatcher},
@@ -39,9 +40,12 @@ use turborepo_filewatch::{
     package_watcher::PackageWatcher,
     FileSystemWatcher, WatchError,
 };
-use turborepo_repository::discovery::{
-    LocalPackageDiscoveryBuilder, PackageDiscovery, PackageDiscoveryBuilder,
+use turborepo_repository::{
+    discovery::{LocalPackageDiscoveryBuilder, PackageDiscovery, PackageDiscoveryBuilder},
+    package_graph::{PackageGraph, WorkspaceName},
+    package_json::PackageJson,
 };
+use turborepo_scm::SCM;
 use turborepo_telemetry::events::generic::GenericEventBuilder;
 
 use super::{
@@ -51,11 +55,12 @@ use super::{
 };
 use crate::{
     daemon::{bump_timeout_layer::BumpTimeoutLayer, endpoint::listen_socket},
+    engine::EngineBuilder,
     run::{
         package_discovery::WatchingPackageDiscovery,
         package_hashes::{watch::WatchingPackageHasher, LocalPackageHashes, PackageHasher},
-        task_id::TaskId,
     },
+    turbo_json::TurboJson,
 };
 
 #[derive(Debug)]
@@ -275,10 +280,61 @@ where
         };
 
         let package_discovery = Arc::new(AsyncMutex::new(package_discovery));
+
+        let scm = SCM::new(&repo_root);
+
+        let package_json_path = repo_root.join_component("package.json");
+        let root_package_json = PackageJson::load(&package_json_path).unwrap();
+        let root_turbo_json = TurboJson::load(
+            &repo_root,
+            AnchoredSystemPath::empty(),
+            &root_package_json,
+            false,
+        )
+        .unwrap();
+
+        let pkg_dep_graph = {
+            let discovery = package_discovery.lock().await;
+            PackageGraph::builder(&repo_root, root_package_json.clone())
+                .with_package_discovery(discovery)
+                .build()
+                .await
+                .unwrap()
+        };
+
+        let engine = EngineBuilder::new(&repo_root, &pkg_dep_graph, false)
+            .with_root_tasks(root_turbo_json.pipeline.keys().cloned())
+            .with_tasks(root_turbo_json.pipeline.keys().cloned())
+            .with_turbo_jsons(Some(
+                [(WorkspaceName::Root, root_turbo_json)]
+                    .into_iter()
+                    .collect(),
+            ))
+            .with_workspaces(
+                pkg_dep_graph
+                    .workspaces()
+                    .map(|(name, _)| name.to_owned())
+                    .collect(),
+            )
+            .build()
+            .unwrap();
+
+        let fallback = LocalPackageHashes::new(
+            scm,
+            pkg_dep_graph
+                .workspaces()
+                .map(|(name, info)| (name.to_owned(), info.to_owned()))
+                .collect(),
+            engine.tasks().cloned(),
+            engine.task_definitions().to_owned(),
+            repo_root,
+        );
+
+        tracing::debug!("initing package hash watcher");
         let package_hashes = AsyncMutex::new(
             WatchingPackageHasher::new(
                 package_discovery.clone(),
-                None::<LocalPackageHashes>,
+                fallback,
                 Duration::from_secs(60 * 5),
                 watcher_rx.clone(),
             )
@@ -567,25 +623,36 @@ where
         &self,
         _request: tonic::Request<proto::DiscoverPackageHashesRequest>,
     ) -> Result<tonic::Response<proto::DiscoverPackageHashesResponse>, tonic::Status> {
-        self.package_hashes
-            .lock()
-            .await
-            .calculate_hashes(GenericEventBuilder::new())
-            .await
-            .map(|hashes| {
-                tonic::Response::new(proto::DiscoverPackageHashesResponse {
-                    package_hashes: hashes
-                        .hashes
-                        .into_iter()
-                        .map(|(task_id, hash)| proto::PackageHash {
-                            package: task_id.package().into(),
-                            task: task_id.task().into(),
-                            hash,
-                        })
-                        .collect(),
+        let hashes = {
+            let mut hasher = self.package_hashes.lock().await;
+            hasher
+                .calculate_hashes(GenericEventBuilder::new())
+                .await
+                .map_err(|e| tonic::Status::internal(format!("{}", e)))?
+        };
+
+        Ok(tonic::Response::new(proto::DiscoverPackageHashesResponse {
+            package_hashes: hashes
+                .hashes
+                .into_iter()
+                .map(|(task_id, hash)| proto::PackageHash {
+                    package: task_id.package().into(),
+                    task: task_id.task().into(),
+                    hash,
+                    inputs: vec![],
                 })
-            })
-            .map_err(|e| tonic::Status::internal(format!("{}", e)))
+                .collect(),
+            file_hashes: hashes
+                .expanded_hashes
+                .into_iter()
+                .flat_map(|h| h.1 .0.into_iter())
+                .unique() // the same file may appear under multiple package-tasks
+                .map(|(k, v)| proto::FileHash {
+                    relative_path: k.to_string(),
+                    hash: v,
+                })
+                .collect(),
+        }))
     }
 
     type SubscribePackageHashesStream =

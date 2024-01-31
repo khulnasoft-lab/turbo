@@ -7,11 +7,11 @@
 //! This powers various intents such as 'query the daemon for this data, or
 //! fallback to local discovery if the daemon is not available'. Eventually,
 //! these strategies will implement some sort of monad-style composition so that
-//! we can track areas of run that are performing sub-optimally.
+//! we can track areas of run that are performing suboptimally.
 
-use std::{future::Future, ops::Deref, sync::Arc};
+use std::future::Future;
 
-use tokio::sync::Mutex;
+use tokio::sync::MutexGuard;
 use tokio_stream::{iter, StreamExt};
 use turbopath::AbsoluteSystemPathBuf;
 
@@ -46,6 +46,15 @@ pub trait PackageDiscovery {
     fn discover_packages(
         &mut self,
     ) -> impl std::future::Future<Output = Result<DiscoveryResponse, Error>> + Send;
+}
+
+impl<'a, T: PackageDiscovery> PackageDiscovery for MutexGuard<'a, T> {
+    fn discover_packages(
+        &mut self,
+    ) -> impl Future<Output = Result<DiscoveryResponse, Error>> + Send {
+        let inner: &mut T = self;
+        inner.discover_packages()
+    }
 }
 
 /// We want to allow for lazily generating the PackageDiscovery implementation

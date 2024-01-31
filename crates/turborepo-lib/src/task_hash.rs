@@ -70,7 +70,7 @@ impl PackageInputsHashes {
     pub fn calculate_file_hashes<'a>(
         scm: &SCM,
         all_tasks: impl ParallelIterator<Item = &'a TaskNode>,
-        workspaces: HashMap<&WorkspaceName, &WorkspaceInfo>,
+        workspaces: &HashMap<WorkspaceName, WorkspaceInfo>,
         task_definitions: &HashMap<TaskId<'static>, TaskDefinition>,
         repo_root: &AbsoluteSystemPath,
         telemetry: &GenericEventBuilder,

@@ -51,6 +51,13 @@ impl<'a> TaskId<'a> {
         })
     }
 
+    pub fn from_owned(package: String, task: String) -> Self {
+        Self {
+            package: package.into(),
+            task: task.into(),
+        }
+    }
+
     pub fn from_graph(workspace: &WorkspaceName, task_name: &TaskName) -> TaskId<'static> {
         task_name.task_id().map_or_else(
             || {
