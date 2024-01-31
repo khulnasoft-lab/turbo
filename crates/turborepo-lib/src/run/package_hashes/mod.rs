@@ -1,6 +1,12 @@
+pub mod watch;
+
 use rayon::iter::ParallelBridge;
+use tokio::sync::Mutex;
 use turbopath::AbsoluteSystemPath;
-use turborepo_repository::package_graph::PackageGraph;
+use turborepo_repository::{
+    discovery::{DiscoveryResponse, PackageDiscovery},
+    package_graph::PackageGraph,
+};
 use turborepo_scm::SCM;
 use turborepo_telemetry::events::generic::GenericEventBuilder;
 
@@ -8,14 +14,10 @@ use super::task_id::TaskId;
 use crate::{engine::Engine, run::error::Error, task_hash::PackageInputsHashes, DaemonClient};
 
 pub trait PackageHasher {
-    async fn calculate_workspaces(
+    fn calculate_hashes(
         &mut self,
         run_telemetry: GenericEventBuilder,
-    ) -> Result<WorkspaceHashes, Error>;
-}
-
-pub struct WorkspaceHashes {
-    pub package_inputs: PackageInputsHashes,
+    ) -> impl std::future::Future<Output = Result<PackageInputsHashes, Error>> + Send;
 }
 
 pub struct LocalPackageHashes<'a> {
@@ -42,10 +44,10 @@ impl<'a> LocalPackageHashes<'a> {
 }
 
 impl<'a> PackageHasher for LocalPackageHashes<'a> {
-    async fn calculate_workspaces(
+    async fn calculate_hashes(
         &mut self,
         run_telemetry: GenericEventBuilder,
-    ) -> Result<WorkspaceHashes, Error> {
+    ) -> Result<PackageInputsHashes, Error> {
         let workspaces = self.pkg_dep_graph.workspaces().collect();
         let package_inputs_hashes = PackageInputsHashes::calculate_file_hashes(
             &self.scm,
@@ -55,9 +57,7 @@ impl<'a> PackageHasher for LocalPackageHashes<'a> {
             self.repo_root,
             &run_telemetry,
         )?;
-        Ok(WorkspaceHashes {
-            package_inputs: package_inputs_hashes,
-        })
+        Ok(package_inputs_hashes)
     }
 }
 
@@ -65,22 +65,20 @@ pub struct DaemonPackageHasher<'a, C: Clone> {
     daemon: &'a mut DaemonClient<C>,
 }
 
-impl<'a, C: Clone> PackageHasher for DaemonPackageHasher<'a, C> {
-    async fn calculate_workspaces(
+impl<'a, C: Clone + Send> PackageHasher for DaemonPackageHasher<'a, C> {
+    async fn calculate_hashes(
         &mut self,
         _run_telemetry: GenericEventBuilder,
-    ) -> Result<WorkspaceHashes, Error> {
+    ) -> Result<PackageInputsHashes, Error> {
         let package_hashes = self.daemon.discover_package_hashes().await;
 
         package_hashes
-            .map(|resp| WorkspaceHashes {
-                package_inputs: PackageInputsHashes {
-                    hashes: resp
-                        .into_iter()
-                        .map(|f| (TaskId::new(&f.package, &f.task).into_owned(), f.hash))
-                        .collect(),
-                    ..Default::default()
-                },
+            .map(|resp| PackageInputsHashes {
+                hashes: resp
+                    .into_iter()
+                    .map(|f| (TaskId::new(&f.package, &f.task).into_owned(), f.hash))
+                    .collect(),
+                ..Default::default()
             })
             .map_err(Error::Daemon)
     }
@@ -93,14 +91,14 @@ impl<'a, C: Clone> DaemonPackageHasher<'a, C> {
 }
 
 impl<T: PackageHasher + Send> PackageHasher for Option<T> {
-    async fn calculate_workspaces(
+    async fn calculate_hashes(
         &mut self,
         run_telemetry: GenericEventBuilder,
-    ) -> Result<WorkspaceHashes, Error> {
+    ) -> Result<PackageInputsHashes, Error> {
         tracing::debug!("hashing packages using optional strategy");
 
         match self {
-            Some(d) => d.calculate_workspaces(run_telemetry).await,
+            Some(d) => d.calculate_hashes(run_telemetry).await,
             None => {
                 tracing::debug!("no strategy available");
                 Err(Error::PackageHashingUnavailable)
@@ -130,23 +128,23 @@ impl<P: PackageHasher, F: PackageHasher> FallbackPackageHasher<P, F> {
 impl<A: PackageHasher + Send, B: PackageHasher + Send> PackageHasher
     for FallbackPackageHasher<A, B>
 {
-    async fn calculate_workspaces(
+    async fn calculate_hashes(
         &mut self,
         run_telemetry: GenericEventBuilder,
-    ) -> Result<WorkspaceHashes, Error> {
+    ) -> Result<PackageInputsHashes, Error> {
         tracing::debug!("discovering packages using fallback strategy");
 
         tracing::debug!("attempting primary strategy");
         match tokio::time::timeout(
             self.timeout,
-            self.primary.calculate_workspaces(run_telemetry.clone()),
+            self.primary.calculate_hashes(run_telemetry.clone()),
         )
         .await
         {
             Ok(Ok(packages)) => Ok(packages),
             Ok(Err(err1)) => {
                 tracing::debug!("primary strategy failed, attempting fallback strategy");
-                match self.fallback.calculate_workspaces(run_telemetry).await {
+                match self.fallback.calculate_hashes(run_telemetry).await {
                     Ok(packages) => Ok(packages),
                     // if the backup is unavailable, return the original error
                     Err(Error::PackageHashingUnavailable) => Err(err1),
@@ -155,7 +153,7 @@ impl<A: PackageHasher + Send, B: PackageHasher + Send> PackageHasher
             }
             Err(_) => {
                 tracing::debug!("primary strategy timed out, attempting fallback strategy");
-                self.fallback.calculate_workspaces(run_telemetry).await
+                self.fallback.calculate_hashes(run_telemetry).await
             }
         }
     }

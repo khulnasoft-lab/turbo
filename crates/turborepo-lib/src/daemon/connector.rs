@@ -399,6 +399,7 @@ enum WaitAction {
 mod test {
     use std::{assert_matches::assert_matches, path::Path};
 
+    use futures::{stream, Stream};
     use sysinfo::Pid;
     use tokio::{
         select,
@@ -647,9 +648,19 @@ mod test {
 
         async fn discover_package_hashes(
             &self,
-            _req: tonic::Request<proto::DiscoverPackagesRequest>,
-        ) -> Result<tonic::Response<proto::DiscoverPackagesResponse>, tonic::Status> {
+            _req: tonic::Request<proto::DiscoverPackageHashesRequest>,
+        ) -> Result<tonic::Response<proto::DiscoverPackageHashesResponse>, tonic::Status> {
             unimplemented!()
+        }
+
+        type SubscribePackageHashesStream =
+            impl Stream<Item = Result<proto::DiscoverPackageHashesResponse, tonic::Status>>;
+
+        async fn subscribe_package_hashes(
+            &self,
+            _request: tonic::Request<proto::DiscoverPackageHashesRequest>,
+        ) -> Result<tonic::Response<Self::SubscribePackageHashesStream>, tonic::Status> {
+            Ok(tonic::Response::new(stream::empty()))
         }
     }
 

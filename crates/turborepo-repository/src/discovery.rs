@@ -9,6 +9,9 @@
 //! these strategies will implement some sort of monad-style composition so that
 //! we can track areas of run that are performing sub-optimally.
 
+use std::{future::Future, ops::Deref, sync::Arc};
+
+use tokio::sync::Mutex;
 use tokio_stream::{iter, StreamExt};
 use turbopath::AbsoluteSystemPathBuf;
 

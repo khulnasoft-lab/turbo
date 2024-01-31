@@ -41,6 +41,7 @@ use turborepo_filewatch::{
 use turborepo_repository::discovery::{
     LocalPackageDiscoveryBuilder, PackageDiscovery, PackageDiscoveryBuilder,
 };
+use turborepo_telemetry::events::generic::GenericEventBuilder;
 
 use super::{
     bump_timeout::BumpTimeout,
@@ -49,7 +50,11 @@ use super::{
 };
 use crate::{
     daemon::{bump_timeout_layer::BumpTimeoutLayer, endpoint::listen_socket},
-    run::package_discovery::WatchingPackageDiscovery,
+    run::{
+        package_discovery::WatchingPackageDiscovery,
+        package_hashes::{watch::WatchingPackageHasher, LocalPackageHashes, PackageHasher},
+        task_id::TaskId,
+    },
 };
 
 #[derive(Debug)]
@@ -179,7 +184,7 @@ where
 impl<S, PDA, PDB> TurboGrpcService<S, PDA, PDB>
 where
     S: Future<Output = CloseReason>,
-    PDA: PackageDiscovery + Send + 'static,
+    PDA: PackageDiscovery + Send + Sync + 'static,
     PDB: PackageDiscoveryBuilder,
     PDB::Output: PackageDiscovery + Send + 'static,
 {
@@ -266,11 +271,19 @@ where
             };
         };
 
+        let package_discovery = Arc::new(AsyncMutex::new(package_discovery));
+        let package_hashes = AsyncMutex::new(WatchingPackageHasher::new(
+            package_discovery.clone(),
+            None::<LocalPackageHashes>,
+            Duration::from_secs(60 * 5),
+        ));
+
         // Run the actual service. It takes ownership of the struct given to it,
         // so we use a private struct with just the pieces of state needed to handle
         // RPCs.
         let service = TurboGrpcServiceInner {
-            package_discovery: AsyncMutex::new(package_discovery),
+            package_discovery,
+            package_hashes,
             shutdown: trigger_shutdown,
             watcher_rx,
             times_saved: Arc::new(Mutex::new(HashMap::new())),
@@ -313,17 +326,18 @@ where
     }
 }
 
-struct TurboGrpcServiceInner<PD> {
+struct TurboGrpcServiceInner<PD, PH> {
     //shutdown: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     shutdown: mpsc::Sender<()>,
     watcher_rx: watch::Receiver<Option<Arc<FileWatching>>>,
     times_saved: Arc<Mutex<HashMap<String, u64>>>,
     start_time: Instant,
     log_file: AbsoluteSystemPathBuf,
-    package_discovery: AsyncMutex<PD>,
+    package_discovery: Arc<AsyncMutex<PD>>,
+    package_hashes: AsyncMutex<PH>,
 }
 
-impl<PD> TurboGrpcServiceInner<PD> {
+impl<PD, PH> TurboGrpcServiceInner<PD, PH> {
     async fn trigger_shutdown(&self) {
         info!("triggering shutdown");
         let _ = self.shutdown.send(()).await;
@@ -422,9 +436,10 @@ async fn watch_root(
 }
 
 #[tonic::async_trait]
-impl<PD> proto::turbod_server::Turbod for TurboGrpcServiceInner<PD>
+impl<PD, PH> proto::turbod_server::Turbod for TurboGrpcServiceInner<PD, PH>
 where
-    PD: PackageDiscovery + Send + 'static,
+    PD: PackageDiscovery + Send + Sync + 'static,
+    PH: PackageHasher + Send + Sync + 'static,
 {
     async fn hello(
         &self,
@@ -545,7 +560,25 @@ where
         &self,
         _request: tonic::Request<proto::DiscoverPackageHashesRequest>,
     ) -> Result<tonic::Response<proto::DiscoverPackageHashesResponse>, tonic::Status> {
-        todo!()
+        self.package_hashes
+            .lock()
+            .await
+            .calculate_hashes(GenericEventBuilder::new())
+            .await
+            .map(|hashes| {
+                tonic::Response::new(proto::DiscoverPackageHashesResponse {
+                    package_hashes: hashes
+                        .hashes
+                        .into_iter()
+                        .map(|(task_id, hash)| proto::PackageHash {
+                            package: task_id.package().into(),
+                            task: task_id.task().into(),
+                            hash,
+                        })
+                        .collect(),
+                })
+            })
+            .map_err(|e| tonic::Status::internal(format!("{}", e)))
     }
 
     type SubscribePackageHashesStream =
@@ -582,7 +615,7 @@ fn compare_versions(client: Version, server: Version, constraint: proto::Version
     }
 }
 
-impl<T> NamedService for TurboGrpcServiceInner<T> {
+impl<PD, PH> NamedService for TurboGrpcServiceInner<PD, PH> {
     const NAME: &'static str = "turborepo.Daemon";
 }
 

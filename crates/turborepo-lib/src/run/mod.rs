@@ -5,7 +5,7 @@ mod error;
 pub(crate) mod global_hash;
 mod graph_visualizer;
 pub(crate) mod package_discovery;
-mod package_hashes;
+pub(crate) mod package_hashes;
 mod scope;
 pub(crate) mod summary;
 pub mod task_id;
@@ -411,7 +411,7 @@ impl Run {
         );
 
         let workspace_hashes = package_hasher
-            .calculate_workspaces(run_telemetry.clone())
+            .calculate_hashes(run_telemetry.clone())
             .await?;
 
         let color_selector = ColorSelector::default();
@@ -490,7 +490,7 @@ impl Run {
             runcache,
             run_tracker,
             &self.opts.run_opts,
-            workspace_hashes.package_inputs,
+            workspace_hashes,
             &env_at_execution_start,
             &global_hash,
             global_env_mode,
