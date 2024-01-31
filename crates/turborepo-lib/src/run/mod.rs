@@ -5,6 +5,7 @@ mod error;
 pub(crate) mod global_hash;
 mod graph_visualizer;
 pub(crate) mod package_discovery;
+mod package_hashes;
 mod scope;
 pub(crate) mod summary;
 pub mod task_id;
@@ -19,7 +20,6 @@ use std::{
 pub use cache::{RunCache, TaskCache};
 use chrono::{DateTime, Local};
 use itertools::Itertools;
-use rayon::iter::ParallelBridge;
 use tracing::debug;
 use turbopath::AnchoredSystemPath;
 use turborepo_analytics::{start_analytics, AnalyticsHandle, AnalyticsSender};
@@ -370,24 +370,23 @@ impl Run {
         let root_external_dependencies_hash =
             is_monorepo.then(|| get_external_deps_hash(&root_workspace.transitive_dependencies));
 
-        let mut global_hash_inputs = get_global_hash_inputs(
-            root_external_dependencies_hash.as_deref(),
-            &self.base.repo_root,
-            pkg_dep_graph.package_manager(),
-            pkg_dep_graph.lockfile(),
-            &root_turbo_json.global_deps,
-            &env_at_execution_start,
-            &root_turbo_json.global_env,
-            root_turbo_json.global_pass_through_env.as_deref(),
-            self.opts.run_opts.env_mode,
-            self.opts.run_opts.framework_inference,
-            root_turbo_json.global_dot_env.as_deref(),
-            &scm,
-        )?;
+        let local_package_hasher = package_hashes::LocalPackageHashes::new(
+            opts.run_opts.env_mode,
+            opts.run_opts.framework_inference,
+            scm,
+        );
 
-        let global_hash = global_hash_inputs.calculate_global_hash_from_inputs();
-
-        debug!("global hash: {}", global_hash);
+        let workspace_hashes = local_package_hasher
+            .calculate_workspaces(
+                root_external_dependencies_hash.as_deref(),
+                &pkg_dep_graph,
+                &self.base.repo_root,
+                &root_turbo_json,
+                &env_at_execution_start,
+                &engine,
+                run_telemetry.clone(),
+            )
+            .await?;
 
         let color_selector = ColorSelector::default();
 
@@ -417,17 +416,7 @@ impl Run {
             global_env_mode = EnvMode::Strict;
         }
 
-        let workspaces = pkg_dep_graph.workspaces().collect();
-        let package_inputs_hashes = PackageInputsHashes::calculate_file_hashes(
-            &scm,
-            engine.tasks().par_bridge(),
-            workspaces,
-            engine.task_definitions(),
-            &self.base.repo_root,
-            &run_telemetry,
-        )?;
-
-        if self.opts.run_opts.parallel {
+        if opts.run_opts.parallel {
             pkg_dep_graph.remove_workspace_dependencies();
             engine = self.build_engine(&pkg_dep_graph, &root_turbo_json, &filtered_pkgs)?;
         }
@@ -448,9 +437,14 @@ impl Run {
 
         let global_env = {
             let mut env = env_at_execution_start
-                .from_wildcards(global_hash_inputs.pass_through_env.unwrap_or_default())
+                .from_wildcards(
+                    workspace_hashes
+                        .global_inputs
+                        .pass_through_env
+                        .unwrap_or_default(),
+                )
                 .map_err(Error::Env)?;
-            if let Some(resolved_global) = &global_hash_inputs.resolved_env_vars {
+            if let Some(resolved_global) = &workspace_hashes.global_inputs.resolved_env_vars {
                 env.union(&resolved_global.all);
             }
             env
@@ -474,10 +468,10 @@ impl Run {
             pkg_dep_graph.clone(),
             runcache,
             run_tracker,
-            &self.opts.run_opts,
-            package_inputs_hashes,
+            &opts,
+            workspace_hashes.package_inputs,
             &env_at_execution_start,
-            &global_hash,
+            &workspace_hashes.global_hash,
             global_env_mode,
             self.base.ui,
             false,
@@ -516,7 +510,7 @@ impl Run {
             .finish(
                 exit_code,
                 filtered_pkgs,
-                global_hash_inputs,
+                workspace_hashes.global_inputs,
                 &engine,
                 &env_at_execution_start,
                 self.opts.scope_opts.pkg_inference_root.as_deref(),
