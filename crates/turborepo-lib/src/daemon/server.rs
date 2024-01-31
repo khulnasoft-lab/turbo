@@ -35,6 +35,7 @@ use turbopath::{AbsoluteSystemPath, AbsoluteSystemPathBuf};
 use turborepo_filewatch::{
     cookie_jar::CookieJar,
     globwatcher::{Error as GlobWatcherError, GlobError, GlobSet, GlobWatcher},
+    package_hash_watcher::PackageHashWatcher,
     package_watcher::PackageWatcher,
     FileSystemWatcher, WatchError,
 };
@@ -72,6 +73,7 @@ pub struct FileWatching {
     _watcher: FileSystemWatcher,
     pub glob_watcher: GlobWatcher,
     pub package_watcher: PackageWatcher,
+    pub package_hash_watcher: PackageHashWatcher,
 }
 
 #[derive(Debug, Error)]
@@ -121,6 +123,7 @@ async fn start_filewatching<PD: PackageDiscovery + Send + 'static>(
         _watcher: watcher,
         glob_watcher,
         package_watcher,
+        package_hash_watcher: PackageHashWatcher,
     })));
     Ok(())
 }
@@ -272,11 +275,15 @@ where
         };
 
         let package_discovery = Arc::new(AsyncMutex::new(package_discovery));
-        let package_hashes = AsyncMutex::new(WatchingPackageHasher::new(
-            package_discovery.clone(),
-            None::<LocalPackageHashes>,
-            Duration::from_secs(60 * 5),
-        ));
+        let package_hashes = AsyncMutex::new(
+            WatchingPackageHasher::new(
+                package_discovery.clone(),
+                None::<LocalPackageHashes>,
+                Duration::from_secs(60 * 5),
+                watcher_rx.clone(),
+            )
+            .await,
+        );
 
         // Run the actual service. It takes ownership of the struct given to it,
         // so we use a private struct with just the pieces of state needed to handle
