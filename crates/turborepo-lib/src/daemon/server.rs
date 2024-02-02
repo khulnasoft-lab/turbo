@@ -77,7 +77,7 @@ pub enum CloseReason {
 pub struct FileWatching {
     _watcher: FileSystemWatcher,
     pub glob_watcher: GlobWatcher,
-    pub package_watcher: PackageWatcher,
+    pub package_watcher: Arc<PackageWatcher>,
     pub package_hash_watcher: PackageHashWatcher,
 }
 
@@ -118,17 +118,24 @@ async fn start_filewatching<PD: PackageDiscovery + Send + 'static>(
         watcher.subscribe(),
     );
     let glob_watcher = GlobWatcher::new(&repo_root, cookie_jar, watcher.subscribe());
-    let package_watcher =
+    let package_watcher = Arc::new(
         PackageWatcher::new(repo_root.clone(), watcher.subscribe(), backup_discovery)
             .await
-            .map_err(|e| WatchError::Setup(format!("{:?}", e)))?;
+            .map_err(|e| WatchError::Setup(format!("{:?}", e)))?,
+    );
+    let package_hash_watcher = PackageHashWatcher::new(
+        repo_root.clone(),
+        watcher.subscribe(),
+        package_watcher.clone(),
+    )
+    .await;
     // We can ignore failures here, it means the server is shutting down and
     // receivers have gone out of scope.
     let _ = watcher_tx.send(Some(Arc::new(FileWatching {
         _watcher: watcher,
         glob_watcher,
         package_watcher,
-        package_hash_watcher: PackageHashWatcher,
+        package_hash_watcher,
     })));
     Ok(())
 }

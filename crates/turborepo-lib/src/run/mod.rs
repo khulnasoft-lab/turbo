@@ -384,6 +384,7 @@ impl Run {
             self.opts.run_opts.env_mode,
             self.opts.run_opts.framework_inference,
             root_turbo_json.global_dot_env.as_deref(),
+            &scm,
         )?;
 
         let global_hash = global_hash_inputs.calculate_global_hash_from_inputs();
@@ -395,7 +396,7 @@ impl Run {
         } else {
             (
                 Some(package_hashes::LocalPackageHashes::new(
-                    scm,
+                    scm.clone(),
                     pkg_dep_graph
                         .workspaces()
                         .map(|(name, info)| (name.to_owned(), info.to_owned()))

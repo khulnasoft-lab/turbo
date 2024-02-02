@@ -7,11 +7,12 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use futures::Stream;
 use notify::Event;
 use tokio::{
     join,
     sync::{
-        broadcast::{self, error::RecvError},
+        broadcast::{self, error::RecvError, Receiver},
         oneshot, watch, Mutex as AsyncMutex,
     },
 };
@@ -21,7 +22,10 @@ use turborepo_repository::{
     package_manager::{self, Error, PackageManager, WorkspaceGlobs},
 };
 
-use crate::NotifyError;
+use crate::{
+    broadcast_map::{HashmapEvent, UpdatingHashMap},
+    NotifyError,
+};
 
 /// Watches the filesystem for changes to packages and package managers.
 pub struct PackageWatcher {
@@ -32,7 +36,12 @@ pub struct PackageWatcher {
     _exit_tx: oneshot::Sender<()>,
     _handle: tokio::task::JoinHandle<()>,
 
-    package_data: Arc<Mutex<Option<HashMap<AbsoluteSystemPathBuf, WorkspaceData>>>>,
+    package_data: watch::Receiver<Option<UpdatingHashMap<AbsoluteSystemPathBuf, WorkspaceData>>>,
+
+    /// this field is only used for creating new subscribers. it will probably
+    /// fill up which will waste some RAM but the queue has a fixed size
+    package_update_rx: broadcast::Receiver<(AbsoluteSystemPathBuf, HashmapEvent<WorkspaceData>)>,
+
     manager_rx: watch::Receiver<Option<PackageManagerState>>,
 }
 
@@ -47,25 +56,34 @@ impl PackageWatcher {
         let subscriber = Subscriber::new(exit_rx, root, recv, backup_discovery).await?;
         let manager_rx = subscriber.manager_receiver();
         let package_data = subscriber.package_data();
+        let package_update_rx = subscriber.subscribe().await;
         let handle = tokio::spawn(subscriber.watch());
         Ok(Self {
             _exit_tx: exit_tx,
             _handle: handle,
             package_data,
+            package_update_rx,
             manager_rx,
         })
     }
 
-    pub async fn get_package_data(&self) -> Option<Vec<WorkspaceData>> {
-        self.package_data
-            .lock()
-            .expect("not poisoned")
-            .as_ref()
-            .map(|inner| inner.values().cloned().collect())
+    pub async fn get_package_data(&self) -> Vec<WorkspaceData> {
+        let mut receiver = self.package_data.clone();
+        let x = receiver.wait_for(|f| f.is_some()).await.unwrap();
+        x.as_ref()
+            .expect("validated above")
+            .as_inner()
+            .values()
+            .cloned()
+            .collect()
     }
 
     pub async fn get_package_manager(&self) -> Option<PackageManager> {
         self.manager_rx.borrow().as_ref().map(|s| s.manager)
+    }
+
+    pub fn subscribe(&self) -> Receiver<(AbsoluteSystemPathBuf, HashmapEvent<WorkspaceData>)> {
+        self.package_update_rx.resubscribe()
     }
 }
 
@@ -82,7 +100,9 @@ struct Subscriber<T: PackageDiscovery> {
     // package manager data
     manager_tx: Arc<watch::Sender<Option<PackageManagerState>>>,
     manager_rx: watch::Receiver<Option<PackageManagerState>>,
-    package_data: Arc<Mutex<Option<HashMap<AbsoluteSystemPathBuf, WorkspaceData>>>>,
+    package_data_rx: watch::Receiver<Option<UpdatingHashMap<AbsoluteSystemPathBuf, WorkspaceData>>>,
+    package_data_tx:
+        Arc<watch::Sender<Option<UpdatingHashMap<AbsoluteSystemPathBuf, WorkspaceData>>>>,
 }
 
 /// A collection of state inferred from a package manager. All this data will
@@ -102,7 +122,8 @@ impl<T: PackageDiscovery + Send + 'static> Subscriber<T> {
         recv: broadcast::Receiver<Result<Event, NotifyError>>,
         backup_discovery: T,
     ) -> Result<Self, Error> {
-        let package_data = Arc::new(Mutex::new(None));
+        let (package_data_tx, package_data_rx) = watch::channel(None);
+        let package_data_tx = Arc::new(package_data_tx);
         let (manager_tx, manager_rx) = watch::channel(None);
         let manager_tx = Arc::new(manager_tx);
 
@@ -111,7 +132,7 @@ impl<T: PackageDiscovery + Send + 'static> Subscriber<T> {
         let package_json_path = repo_root.join_component("package.json");
 
         let _task = tokio::spawn({
-            let package_data = package_data.clone();
+            let package_data_tx = package_data_tx.clone();
             let manager_tx = manager_tx.clone();
             let backup_discovery = backup_discovery.clone();
             let repo_root = repo_root.clone();
@@ -148,13 +169,14 @@ impl<T: PackageDiscovery + Send + 'static> Subscriber<T> {
                 };
 
                 manager_tx.send(Some(state)).ok();
-                *package_data.lock().expect("not poisoned") = Some(
+                package_data_tx.send(Some(
                     initial_discovery
                         .workspaces
                         .into_iter()
                         .map(|p| (p.package_json.parent().expect("non-root").to_owned(), p))
-                        .collect(),
-                );
+                        .collect::<HashMap<_, _>>()
+                        .into(),
+                ));
             }
         });
 
@@ -164,10 +186,22 @@ impl<T: PackageDiscovery + Send + 'static> Subscriber<T> {
             backup_discovery,
             repo_root,
             root_package_json_path: package_json_path,
-            package_data,
+            package_data_rx,
+            package_data_tx,
             manager_rx,
             manager_tx,
         })
+    }
+
+    pub async fn subscribe(
+        &self,
+    ) -> Receiver<(AbsoluteSystemPathBuf, HashmapEvent<WorkspaceData>)> {
+        let mut receiver = self.package_data_rx.clone();
+        let x = receiver.wait_for(|f| f.is_some()).await;
+        // todo: handle error
+        let x = x.unwrap();
+        let x = x.as_ref().expect("validated above");
+        x.subscribe()
     }
 
     async fn watch(mut self) {
@@ -223,8 +257,8 @@ impl<T: PackageDiscovery + Send + 'static> Subscriber<T> {
 
     pub fn package_data(
         &self,
-    ) -> Arc<Mutex<Option<HashMap<AbsoluteSystemPathBuf, WorkspaceData>>>> {
-        self.package_data.clone()
+    ) -> watch::Receiver<Option<UpdatingHashMap<AbsoluteSystemPathBuf, WorkspaceData>>> {
+        self.package_data_rx.clone()
     }
 
     /// Returns Err(()) if the package manager channel is closed, indicating
@@ -305,20 +339,38 @@ impl<T: PackageDiscovery + Send + 'static> Subscriber<T> {
                     tokio::fs::try_exists(&turbo_json)
                 );
 
-                let mut data = self.package_data.lock().expect("not poisoned");
-                if let Some(data) = data.as_mut() {
-                    if let Ok(true) = package_exists {
-                        data.insert(
-                            path_workspace,
-                            WorkspaceData {
-                                package_json,
-                                turbo_json: turbo_exists.unwrap_or_default().then_some(turbo_json),
-                            },
-                        );
-                    } else {
-                        data.remove(&path_workspace);
-                    }
-                }
+                self.package_data_tx
+                    .send_modify(|mut data| match (&mut data, package_exists) {
+                        (Some(data), Ok(true)) => {
+                            data.insert(
+                                path_workspace,
+                                WorkspaceData {
+                                    package_json,
+                                    turbo_json: turbo_exists
+                                        .unwrap_or_default()
+                                        .then_some(turbo_json),
+                                },
+                            );
+                        }
+                        (Some(data), Ok(false)) => {
+                            data.remove(path_workspace);
+                        }
+                        (None, Ok(true)) => {
+                            let mut map = HashMap::new();
+                            map.insert(
+                                path_workspace,
+                                WorkspaceData {
+                                    package_json,
+                                    turbo_json: turbo_exists
+                                        .unwrap_or_default()
+                                        .then_some(turbo_json),
+                                },
+                            );
+                            *data = Some(map.into());
+                        }
+                        (None, Ok(false)) => {} // do nothing
+                        (_, Err(_)) => todo!(),
+                    });
             }
         }
 
@@ -358,9 +410,11 @@ impl<T: PackageDiscovery + Send + 'static> Subscriber<T> {
             let changed = state.filter != new_filter;
 
             if changed {
-                let mut state = state.to_owned();
-                state.filter = new_filter;
-                self.manager_tx.send(Some(state)).ok();
+                self.manager_tx.send_modify(|f| {
+                    if let Some(state) = f {
+                        state.filter = new_filter;
+                    }
+                });
             }
 
             Ok(changed)
@@ -379,8 +433,7 @@ impl<T: PackageDiscovery + Send + 'static> Subscriber<T> {
         {
             // clear all data
             self.manager_tx.send(None).ok();
-            let mut data = self.package_data.lock().expect("not poisoned");
-            *data = None;
+            self.package_data_tx.send(None).ok();
         }
         tracing::debug!("root package.json changed, refreshing package manager and globs");
         let resp = self
@@ -394,7 +447,7 @@ impl<T: PackageDiscovery + Send + 'static> Subscriber<T> {
             &self.repo_root,
             &self.root_package_json_path,
         )
-        .map(|(a, b)| (resp, a, b));
+        .map(move |(a, b)| (resp, a, b));
 
         // if the package.json changed, we need to re-infer the package manager
         // and update the glob list
@@ -416,14 +469,18 @@ impl<T: PackageDiscovery + Send + 'static> Subscriber<T> {
                 {
                     // if this fails, we are closing anyways so ignore
                     self.manager_tx.send(Some(state)).ok();
-                    let mut data = self.package_data.lock().unwrap();
-                    *data = Some(
-                        new_manager
+                    self.package_data_tx.send_modify(move |mut d| {
+                        let new_data = new_manager
                             .workspaces
                             .into_iter()
                             .map(|p| (p.package_json.parent().expect("non-root").to_owned(), p))
-                            .collect(),
-                    );
+                            .collect::<HashMap<_, _>>();
+                        if let Some(data) = &mut d {
+                            data.replace(new_data);
+                        } else {
+                            *d = Some(new_data.into());
+                        }
+                    });
                 }
             }
             Err(e) => {
@@ -440,18 +497,22 @@ impl<T: PackageDiscovery + Send + 'static> Subscriber<T> {
         tracing::debug!("rediscovering packages");
         {
             // make sure package data is unavailable while we are updating
-            let mut data = self.package_data.lock().expect("not poisoned");
-            *data = None;
+            self.package_data_tx.send(None);
         }
 
-        if let Ok(data) = self.backup_discovery.lock().await.discover_packages().await {
-            let workspace = data
-                .workspaces
-                .into_iter()
-                .map(|p| (p.package_json.parent().expect("non-root").to_owned(), p))
-                .collect();
-            let mut data = self.package_data.lock().expect("not poisoned");
-            *data = Some(workspace);
+        if let Ok(response) = self.backup_discovery.lock().await.discover_packages().await {
+            self.package_data_tx.send_modify(|d| {
+                let new_data = response
+                    .workspaces
+                    .into_iter()
+                    .map(|p| (p.package_json.parent().expect("non-root").to_owned(), p))
+                    .collect::<HashMap<_, _>>();
+                if let Some(data) = d {
+                    data.replace(new_data);
+                } else {
+                    *d = Some(new_data.into());
+                }
+            });
         } else {
             // package data stays unavailable
             tracing::error!("error discovering packages");
