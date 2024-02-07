@@ -4,21 +4,107 @@ use std::collections::HashMap;
 
 use rayon::prelude::*;
 use turbopath::{AbsoluteSystemPathBuf, RelativeUnixPathBuf};
-use turborepo_repository::package_graph::{WorkspaceInfo, WorkspaceName};
+use turborepo_repository::{
+    discovery::PackageDiscoveryBuilder,
+    package_graph::{PackageGraph, WorkspaceInfo, WorkspaceName},
+    package_json::PackageJson,
+    package_manager,
+};
 use turborepo_scm::SCM;
 use turborepo_telemetry::events::generic::GenericEventBuilder;
 
 use super::task_id::TaskId;
 use crate::{
-    engine::TaskNode, hash::FileHashes, run::error::Error, task_graph::TaskDefinition,
-    task_hash::PackageInputsHashes, DaemonClient,
+    engine::{EngineBuilder, TaskNode},
+    hash::FileHashes,
+    run::error::Error,
+    task_graph::TaskDefinition,
+    task_hash::PackageInputsHashes,
+    DaemonClient,
 };
 
 pub trait PackageHasher {
     fn calculate_hashes(
-        &mut self,
+        &self,
         run_telemetry: GenericEventBuilder,
     ) -> impl std::future::Future<Output = Result<PackageInputsHashes, Error>> + Send;
+}
+
+/// We want to allow for lazily generating the PackageDiscovery implementation
+/// to prevent unnecessary work. This trait allows us to do that.
+///
+/// Note: there is a blanket implementation for everything that implements
+/// PackageDiscovery
+pub trait PackageHasherBuilder {
+    type Output: PackageHasher;
+    type Error: std::error::Error;
+
+    fn build(self) -> impl std::future::Future<Output = Result<Self::Output, Self::Error>> + Send;
+}
+
+impl<T: PackageHasher + Send> PackageHasherBuilder for T {
+    type Output = T;
+    type Error = std::convert::Infallible;
+
+    async fn build(self) -> Result<Self::Output, Self::Error> {
+        Ok(self)
+    }
+}
+
+pub struct LocalPackageHasherBuilder<PDB: PackageDiscoveryBuilder + Sync> {
+    pub repo_root: AbsoluteSystemPathBuf,
+    pub discovery: PDB,
+    pub root_package_json: PackageJson,
+    pub root_turbo_json: crate::turbo_json::TurboJson,
+    pub scm: SCM,
+}
+
+impl<PDB> PackageHasherBuilder for LocalPackageHasherBuilder<PDB>
+where
+    PDB: PackageDiscoveryBuilder + Sync + Send,
+    PDB::Output: Send + Sync,
+    PDB::Error: Into<package_manager::Error>,
+{
+    type Output = LocalPackageHashes;
+    type Error = std::convert::Infallible;
+
+    async fn build(self) -> Result<Self::Output, Self::Error> {
+        let pkg_dep_graph = {
+            PackageGraph::builder(&self.repo_root, self.root_package_json)
+                .with_package_discovery(self.discovery)
+                .build()
+                .await
+                .unwrap()
+        };
+
+        let engine = EngineBuilder::new(&self.repo_root, &pkg_dep_graph, false)
+            .with_root_tasks(self.root_turbo_json.pipeline.keys().cloned())
+            .with_tasks(self.root_turbo_json.pipeline.keys().cloned())
+            .with_turbo_jsons(Some(
+                [(WorkspaceName::Root, self.root_turbo_json)]
+                    .into_iter()
+                    .collect(),
+            ))
+            .with_workspaces(
+                pkg_dep_graph
+                    .workspaces()
+                    .map(|(name, _)| name.to_owned())
+                    .collect(),
+            )
+            .build()
+            .unwrap();
+
+        Ok(LocalPackageHashes::new(
+            self.scm,
+            pkg_dep_graph
+                .workspaces()
+                .map(|(name, info)| (name.to_owned(), info.to_owned()))
+                .collect(),
+            engine.tasks().cloned(),
+            engine.task_definitions().to_owned(),
+            self.repo_root,
+        ))
+    }
 }
 
 pub struct LocalPackageHashes {
@@ -57,7 +143,7 @@ impl LocalPackageHashes {
 
 impl PackageHasher for LocalPackageHashes {
     async fn calculate_hashes(
-        &mut self,
+        &self,
         run_telemetry: GenericEventBuilder,
     ) -> Result<PackageInputsHashes, Error> {
         tracing::debug!("running local package hash discovery in {}", self.repo_root);
@@ -73,16 +159,18 @@ impl PackageHasher for LocalPackageHashes {
     }
 }
 
-pub struct DaemonPackageHasher<'a, C: Clone> {
-    daemon: &'a mut DaemonClient<C>,
+pub struct DaemonPackageHasher<C> {
+    daemon: DaemonClient<C>,
 }
 
-impl<'a, C: Clone + Send> PackageHasher for DaemonPackageHasher<'a, C> {
+impl<C: Clone + Send + Sync> PackageHasher for DaemonPackageHasher<C> {
     async fn calculate_hashes(
-        &mut self,
+        &self,
         _run_telemetry: GenericEventBuilder,
     ) -> Result<PackageInputsHashes, Error> {
-        let package_hashes = self.daemon.discover_package_hashes().await;
+        // clone to avoid using a mutex or a mutable reference
+        let mut daemon = self.daemon.clone();
+        let package_hashes = daemon.discover_package_hashes().await;
 
         package_hashes
             .map(|resp| {
@@ -127,15 +215,15 @@ impl<'a, C: Clone + Send> PackageHasher for DaemonPackageHasher<'a, C> {
     }
 }
 
-impl<'a, C: Clone> DaemonPackageHasher<'a, C> {
-    pub fn new(daemon: &'a mut DaemonClient<C>) -> Self {
+impl<C> DaemonPackageHasher<C> {
+    pub fn new(daemon: DaemonClient<C>) -> Self {
         Self { daemon }
     }
 }
 
-impl<T: PackageHasher + Send> PackageHasher for Option<T> {
+impl<T: PackageHasher + Send + Sync> PackageHasher for Option<T> {
     async fn calculate_hashes(
-        &mut self,
+        &self,
         run_telemetry: GenericEventBuilder,
     ) -> Result<PackageInputsHashes, Error> {
         tracing::debug!("hashing packages using optional strategy");
@@ -168,11 +256,11 @@ impl<P: PackageHasher, F: PackageHasher> FallbackPackageHasher<P, F> {
     }
 }
 
-impl<A: PackageHasher + Send, B: PackageHasher + Send> PackageHasher
+impl<A: PackageHasher + Send + Sync, B: PackageHasher + Send + Sync> PackageHasher
     for FallbackPackageHasher<A, B>
 {
     async fn calculate_hashes(
-        &mut self,
+        &self,
         run_telemetry: GenericEventBuilder,
     ) -> Result<PackageInputsHashes, Error> {
         tracing::debug!("discovering packages using fallback strategy");

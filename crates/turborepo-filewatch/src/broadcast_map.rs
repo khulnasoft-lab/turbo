@@ -103,9 +103,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
 
-    use tokio::{runtime::Runtime, sync::broadcast};
+    use tokio::runtime::Runtime;
 
     use super::*;
 

@@ -39,6 +39,7 @@ version = "0.2.4"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
 tokio-scoped = "0.2.0"
 
 [features]

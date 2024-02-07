@@ -1,28 +1,35 @@
 use std::sync::Arc;
 
-use tokio::{join, sync::watch::Receiver};
+use tokio::{
+    join,
+    sync::{watch::Receiver, Mutex},
+};
 use turbopath::AbsoluteSystemPathBuf;
+use turborepo_filewatch::package_watcher::PackageWatcher;
 use turborepo_repository::discovery::{DiscoveryResponse, Error, PackageDiscovery, WorkspaceData};
 
 use crate::daemon::{proto::PackageManager, DaemonClient, FileWatching};
 
 #[derive(Debug)]
-pub struct DaemonPackageDiscovery<'a, C: Clone> {
-    daemon: &'a mut DaemonClient<C>,
+pub struct DaemonPackageDiscovery<C> {
+    daemon: DaemonClient<C>,
 }
 
-impl<'a, C: Clone> DaemonPackageDiscovery<'a, C> {
-    pub fn new(daemon: &'a mut DaemonClient<C>) -> Self {
+impl<C> DaemonPackageDiscovery<C> {
+    pub fn new(daemon: DaemonClient<C>) -> Self {
         Self { daemon }
     }
 }
 
-impl<'a, C: Clone + Send> PackageDiscovery for DaemonPackageDiscovery<'a, C> {
-    async fn discover_packages(&mut self) -> Result<DiscoveryResponse, Error> {
+impl<C: Clone + Send + Sync> PackageDiscovery for DaemonPackageDiscovery<C> {
+    async fn discover_packages(&self) -> Result<DiscoveryResponse, Error> {
         tracing::debug!("discovering packages using daemon");
 
-        let response = self
-            .daemon
+        // we clone here, rather than mutex, so that we can du multiple requests in
+        // parallel
+        let mut client = self.daemon.clone();
+
+        let response = client
             .discover_packages()
             .await
             .map_err(|e| Error::Failed(Box::new(e)))?;
@@ -42,53 +49,5 @@ impl<'a, C: Clone + Send> PackageDiscovery for DaemonPackageDiscovery<'a, C> {
                 .expect("valid")
                 .into(),
         })
-    }
-}
-
-/// A package discovery strategy that watches the file system for changes. Basic
-/// idea:
-/// - Set up a watcher on file changes on the relevant workspace file for the
-///   package manager
-/// - When the workspace globs change, re-discover the workspace
-/// - When a package.json changes, re-discover the workspace
-/// - Keep an in-memory cache of the workspace
-pub struct WatchingPackageDiscovery {
-    /// file watching may not be ready yet so we store a watcher
-    /// through which we can get the file watching stack
-    watcher: Receiver<Option<Arc<crate::daemon::FileWatching>>>,
-}
-
-impl WatchingPackageDiscovery {
-    pub fn new(watcher: Receiver<Option<Arc<FileWatching>>>) -> Self {
-        Self { watcher }
-    }
-}
-
-impl PackageDiscovery for WatchingPackageDiscovery {
-    async fn discover_packages(&mut self) -> Result<DiscoveryResponse, Error> {
-        tracing::debug!("discovering packages using watcher implementation");
-
-        // need to clone and drop the Ref before we can await
-        let watcher = {
-            let watcher = self
-                .watcher
-                .wait_for(|opt| opt.is_some())
-                .await
-                .map_err(|e| Error::Failed(Box::new(e)))?;
-            watcher.as_ref().expect("guaranteed some above").clone()
-        };
-
-        let (package_manager, workspaces) = join! {
-            watcher.package_watcher.get_package_manager(),
-            watcher.package_watcher.get_package_data()
-        };
-
-        package_manager
-            .zip(workspaces)
-            .map(|(package_manager, workspaces)| DiscoveryResponse {
-                workspaces,
-                package_manager,
-            })
-            .ok_or(Error::Unavailable)
     }
 }

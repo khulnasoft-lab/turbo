@@ -1,13 +1,15 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use tokio::{
-    sync::{watch, watch::error::RecvError, Mutex},
+    sync::{watch::error::RecvError, Mutex},
     time::error::Elapsed,
 };
-use turborepo_repository::discovery::PackageDiscovery;
+use turborepo_filewatch::OptionalWatch;
+use turborepo_repository::discovery::{PackageDiscovery, PackageDiscoveryBuilder};
 use turborepo_telemetry::events::generic::GenericEventBuilder;
 
+use super::PackageHasherBuilder;
 use crate::{
     daemon::FileWatching,
     run::{package_hashes::PackageHasher, task_id::TaskId, Error},
@@ -17,15 +19,15 @@ use crate::{
 /// WatchingPackageHasher discovers all the packages / tasks in a project,
 /// watches them all, and recalculates all the hashes for them eagerly.
 pub struct WatchingPackageHasher<PD, PH> {
-    package_discovery: Arc<Mutex<PD>>,
+    package_discovery: PD,
     /// the fallback is used occasionally to flush / report any drifted
     /// hashes. the result is compared with the current map, and warnings
     /// are logged
-    fallback: PH,
+    fallback: OptionalWatch<PH>,
     interval: Duration,
-    map: Arc<Mutex<HashMap<TaskId<'static>, String>>>,
+    hashes_rx: OptionalWatch<HashMap<TaskId<'static>, String>>,
 
-    watcher_rx: watch::Receiver<Option<Arc<FileWatching>>>,
+    file_watching: FileWatching,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -36,36 +38,45 @@ enum WaitError {
     Unavailable(#[from] RecvError),
 }
 
-impl<PD, PH: PackageHasher> WatchingPackageHasher<PD, PH> {
-    pub async fn new(
-        package_discovery: Arc<Mutex<PD>>,
-        mut fallback: PH,
+impl<PD, PH: PackageHasher + Send + Sync + 'static> WatchingPackageHasher<PD, PH> {
+    pub fn new<PHB: PackageHasherBuilder<Output = PH> + Send + 'static>(
+        package_discovery: PD,
+        mut fallback: PHB,
         interval: Duration,
-        watcher_rx: watch::Receiver<Option<Arc<FileWatching>>>,
+        file_watching: FileWatching,
     ) -> Self {
-        let map = Arc::new(Mutex::new(
-            fallback
-                .calculate_hashes(Default::default())
-                .await
-                .unwrap()
-                .hashes,
-        ));
+        let (hashes_tx, hashes_rx) = OptionalWatch::new();
+        let hashes_tx = Arc::new(hashes_tx);
+
+        let (hasher_tx, hasher_rx) = OptionalWatch::new();
+        let hasher_tx = Arc::new(hasher_tx);
 
         // listen to updates from the file watcher and update the map
         let _subscriber = tokio::task::spawn({
-            let watcher_rx = watcher_rx.clone();
-            let map = map.clone();
+            let file_watching = file_watching.clone();
+            let hashes_tx = hashes_tx.clone();
             async move {
-                let watch = Self::wait_for_filewatching(watcher_rx.clone())
+                let mut hasher = fallback.build().await.unwrap();
+
+                let data = hasher
+                    .calculate_hashes(Default::default())
                     .await
-                    .unwrap();
-                let mut stream = watch.package_hash_watcher.subscribe();
+                    .unwrap()
+                    .hashes;
+
+                hasher_tx.send(Some(hasher));
+                hashes_tx.send(Some(data));
+
+                let mut stream = file_watching.package_hash_watcher.subscribe();
                 while let Some(update) = stream.next().await {
-                    let mut map = map.lock().await;
-                    map.insert(
-                        TaskId::new(&update.package, &update.task).into_owned(),
-                        update.hash,
-                    );
+                    hashes_tx.send_modify(|d| {
+                        todo!();
+                        // d.insert(
+                        //     TaskId::new(&update.package,
+                        // &update.task).into_owned(),
+                        //     update.hash,
+                        // );
+                    })
                 }
             }
         });
@@ -73,34 +84,31 @@ impl<PD, PH: PackageHasher> WatchingPackageHasher<PD, PH> {
         Self {
             interval,
             package_discovery,
-            fallback,
-            map,
-            watcher_rx,
+            fallback: hasher_rx,
+            hashes_rx,
+            file_watching,
         }
-    }
-
-    async fn wait_for_filewatching(
-        watcher_rx: watch::Receiver<Option<Arc<FileWatching>>>,
-    ) -> Result<Arc<FileWatching>, WaitError> {
-        let mut rx = watcher_rx.clone();
-        let fw = tokio::time::timeout(Duration::from_secs(1), rx.wait_for(|opt| opt.is_some()))
-            .await??;
-
-        return Ok(fw.as_ref().expect("guaranteed some above").clone());
     }
 }
 
-impl<PD: PackageDiscovery + Send, PH: PackageHasher + Send> PackageHasher
+impl<PD: PackageDiscovery + Send + Sync, PH: PackageHasher + Send + Sync> PackageHasher
     for WatchingPackageHasher<PD, PH>
 {
     async fn calculate_hashes(
-        &mut self,
+        &self,
         _run_telemetry: GenericEventBuilder,
     ) -> Result<PackageInputsHashes, Error> {
-        let data = self.map.lock().await;
-        Ok(PackageInputsHashes {
-            hashes: data.clone(),
-            expanded_hashes: Default::default(),
-        })
+        // clone here to avoid a mutable reference to self / a mutex
+        let mut hashes_rx = self.hashes_rx.clone();
+
+        let data = hashes_rx.get().now_or_never();
+        if let Some(Ok(data)) = data {
+            Ok(PackageInputsHashes {
+                hashes: data.to_owned(),
+                expanded_hashes: Default::default(),
+            })
+        } else {
+            Err(Error::PackageHashingUnavailable)
+        }
     }
 }

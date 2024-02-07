@@ -122,7 +122,7 @@ impl<'a, P> PackageGraphBuilder<'a, P> {
 impl<'a, T> PackageGraphBuilder<'a, T>
 where
     T: PackageDiscoveryBuilder,
-    T::Output: Send,
+    T::Output: Send + Sync,
     T::Error: Into<crate::package_manager::Error>,
 {
     /// Build the `PackageGraph`.

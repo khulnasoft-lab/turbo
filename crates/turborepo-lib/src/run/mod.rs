@@ -295,7 +295,7 @@ impl Run {
             PackageGraph::builder(&self.base.repo_root, root_package_json.clone())
                 .with_single_package_mode(self.opts.run_opts.single_package)
                 .with_package_discovery(FallbackPackageDiscovery::new(
-                    daemon.as_mut().map(DaemonPackageDiscovery::new),
+                    daemon.clone().map(DaemonPackageDiscovery::new),
                     fallback,
                     duration,
                 ))
@@ -410,7 +410,7 @@ impl Run {
         };
 
         let mut package_hasher = FallbackPackageHasher::new(
-            daemon.as_mut().map(DaemonPackageHasher::new),
+            daemon.clone().map(DaemonPackageHasher::new),
             fallback,
             duration,
         );
