@@ -121,12 +121,25 @@ impl FileSystemWatcher {
         let (send_file_events, mut recv_file_events) = mpsc::channel(1024);
         let watch_root = root.to_owned();
         debug!("starting filewatcher");
-        let watcher = run_watcher(&watch_root, send_file_events)?;
         let (exit_ch, exit_signal) = tokio::sync::oneshot::channel();
         // Ensure we are ready to receive new events, not events for existing state
         tokio::task::spawn({
             let cookie_dir = cookie_dir.clone();
             async move {
+                // this is expensive, so run it in a blocking task so we can return immediately
+                let watch_root_task = watch_root.clone();
+                let task = tokio::task::spawn_blocking(move || {
+                    run_watcher(&watch_root_task, send_file_events)
+                });
+
+                let watcher = task.await;
+
+                let Ok(Ok(watcher)) = watcher else {
+                    // if the watcher fails, just return. we don't set the event sender, and other
+                    // services will never start
+                    return;
+                };
+
                 debug!("waiting for initial filesystem cookie");
                 wait_for_cookie(&cookie_dir, &mut recv_file_events)
                     .await
