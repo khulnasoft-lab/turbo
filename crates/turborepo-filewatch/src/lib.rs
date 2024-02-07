@@ -21,7 +21,7 @@ use notify::event::EventKind;
 use notify::{Config, RecommendedWatcher};
 use notify::{Event, EventHandler, RecursiveMode, Watcher};
 use thiserror::Error;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch::error::RecvError};
 use tracing::{debug, warn};
 use turbopath::{AbsoluteSystemPath, AbsoluteSystemPathBuf, PathRelation};
 #[cfg(feature = "manual_recursive_watch")]
@@ -84,7 +84,8 @@ impl Display for NotifyError {
 }
 
 pub struct FileSystemWatcher {
-    sender: broadcast::Sender<Result<Event, NotifyError>>,
+    sender: OptionalWatch<broadcast::Sender<Result<Event, NotifyError>>>,
+    receiver: OptionalWatch<broadcast::Receiver<Result<Event, NotifyError>>>,
     // _exit_ch exists to trigger a close on the receiver when an instance
     // of this struct is dropped. The task that is receiving events will exit,
     // dropping the other sender for the broadcast channel, causing all receivers
@@ -112,10 +113,11 @@ impl FileSystemWatcher {
             )));
         }
         setup_cookie_dir(&cookie_dir)?;
-        let (sender, _) = broadcast::channel(1024);
+        let (sender_tx, sender_rx) = OptionalWatch::new();
+        let (receiver_tx, receiver_rx) = OptionalWatch::new();
+
         let (send_file_events, mut recv_file_events) = mpsc::channel(1024);
         let watch_root = root.to_owned();
-        let broadcast_sender = sender.clone();
         debug!("starting filewatcher");
         let watcher = run_watcher(&watch_root, send_file_events)?;
         let (exit_ch, exit_signal) = tokio::sync::oneshot::channel();
@@ -128,25 +130,33 @@ impl FileSystemWatcher {
                     .await
                     .unwrap();
                 debug!("filewatching ready");
-                watch_events(
-                    watcher,
-                    watch_root,
-                    recv_file_events,
-                    exit_signal,
-                    broadcast_sender,
-                )
-                .await;
+
+                let (sender, receiver) = broadcast::channel(1024);
+                sender_tx.send(Some(sender.clone())).unwrap();
+                receiver_tx.send(Some(receiver)).unwrap();
+
+                watch_events(watcher, watch_root, recv_file_events, exit_signal, sender).await;
             }
         });
         Ok(Self {
-            sender,
+            sender: sender_rx,
+            receiver: receiver_rx,
             _exit_ch: exit_ch,
             cookie_dir,
         })
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<Result<Event, NotifyError>> {
-        self.sender.subscribe()
+    /// A convenience method around the sender watcher that waits for file
+    /// watching to be ready and then returns a handle to the file stream.
+    pub async fn subscribe(
+        &self,
+    ) -> Result<broadcast::Receiver<Result<Event, NotifyError>>, RecvError> {
+        let mut receiver = self.receiver.clone();
+        receiver.get().await.map(|r| r.resubscribe())
+    }
+
+    pub fn watch(&self) -> OptionalWatch<broadcast::Receiver<Result<Event, NotifyError>>> {
+        self.receiver.clone()
     }
 
     pub fn cookie_dir(&self) -> &AbsoluteSystemPath {
@@ -494,7 +504,7 @@ mod test {
         sibling_path.create_dir_all().unwrap();
 
         let watcher = FileSystemWatcher::new_with_default_cookie_dir(&repo_root).unwrap();
-        let mut recv = watcher.subscribe();
+        let mut recv = watcher.subscribe().await.unwrap();
 
         expect_watching(&mut recv, &[&repo_root, &parent_path, &child_path]).await;
         let foo_path = child_path.join_component("foo");
@@ -552,7 +562,7 @@ mod test {
         child_path.create_dir_all().unwrap();
 
         let watcher = FileSystemWatcher::new_with_default_cookie_dir(&repo_root).unwrap();
-        let mut recv = watcher.subscribe();
+        let mut recv = watcher.subscribe().await.unwrap();
 
         expect_watching(&mut recv, &[&repo_root, &parent_path, &child_path]).await;
 
@@ -594,7 +604,7 @@ mod test {
         child_path.create_dir_all().unwrap();
 
         let watcher = FileSystemWatcher::new_with_default_cookie_dir(&repo_root).unwrap();
-        let mut recv = watcher.subscribe();
+        let mut recv = watcher.subscribe().await.unwrap();
         expect_watching(&mut recv, &[&repo_root, &parent_path, &child_path]).await;
 
         repo_root.remove_dir_all().unwrap();
@@ -623,7 +633,7 @@ mod test {
         child_path.create_dir_all().unwrap();
 
         let watcher = FileSystemWatcher::new_with_default_cookie_dir(&repo_root).unwrap();
-        let mut recv = watcher.subscribe();
+        let mut recv = watcher.subscribe().await.unwrap();
         expect_watching(&mut recv, &[&repo_root, &parent_path, &child_path]).await;
 
         let new_parent = repo_root.join_component("new_parent");
@@ -655,7 +665,7 @@ mod test {
         child_path.create_dir_all().unwrap();
 
         let watcher = FileSystemWatcher::new_with_default_cookie_dir(&repo_root).unwrap();
-        let mut recv = watcher.subscribe();
+        let mut recv = watcher.subscribe().await.unwrap();
         expect_watching(&mut recv, &[&repo_root, &parent_path, &child_path]).await;
 
         let new_repo_root = repo_root.parent().unwrap().join_component("new_repo_root");
@@ -686,7 +696,7 @@ mod test {
         child_path.create_dir_all().unwrap();
 
         let watcher = FileSystemWatcher::new_with_default_cookie_dir(&repo_root).unwrap();
-        let mut recv = watcher.subscribe();
+        let mut recv = watcher.subscribe().await.unwrap();
         expect_watching(&mut recv, &[&repo_root, &parent_path, &child_path]).await;
 
         // Create symlink during file watching
@@ -727,7 +737,7 @@ mod test {
         symlink_path.symlink_to_dir(child_path.as_str()).unwrap();
 
         let watcher = FileSystemWatcher::new_with_default_cookie_dir(&repo_root).unwrap();
-        let mut recv = watcher.subscribe();
+        let mut recv = watcher.subscribe().await.unwrap();
         expect_watching(&mut recv, &[&repo_root, &parent_path, &child_path]).await;
 
         // Delete symlink during file watching
@@ -766,7 +776,7 @@ mod test {
         symlink_path.symlink_to_dir(child_path.as_str()).unwrap();
 
         let watcher = FileSystemWatcher::new_with_default_cookie_dir(&repo_root).unwrap();
-        let mut recv = watcher.subscribe();
+        let mut recv = watcher.subscribe().await.unwrap();
         expect_watching(&mut recv, &[&repo_root, &parent_path, &child_path]).await;
 
         // Delete symlink during file watching
@@ -810,7 +820,7 @@ mod test {
         child_path.create_dir_all().unwrap();
 
         let watcher = FileSystemWatcher::new_with_default_cookie_dir(&repo_root).unwrap();
-        let mut recv = watcher.subscribe();
+        let mut recv = watcher.subscribe().await.unwrap();
         expect_watching(&mut recv, &[&repo_root, &parent_path, &child_path]).await;
 
         let repo_parent = repo_root.parent().unwrap();
@@ -848,7 +858,7 @@ mod test {
         child_path.create_dir_all().unwrap();
 
         let watcher = FileSystemWatcher::new_with_default_cookie_dir(&repo_root).unwrap();
-        let mut recv = watcher.subscribe();
+        let mut recv = watcher.subscribe().await.unwrap();
         expect_watching(&mut recv, &[&repo_root, &parent_path, &child_path]).await;
 
         let repo_parent = repo_root.parent().unwrap();
@@ -869,7 +879,7 @@ mod test {
             // create and immediately drop the watcher, which should trigger the exit
             // channel
             let watcher = FileSystemWatcher::new_with_default_cookie_dir(&repo_root).unwrap();
-            watcher.subscribe()
+            watcher.subscribe().await.unwrap()
         };
 
         // There may be spurious events, but we should expect a close in short order

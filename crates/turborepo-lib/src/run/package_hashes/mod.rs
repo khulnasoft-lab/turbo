@@ -3,7 +3,7 @@ pub mod watch;
 use std::collections::HashMap;
 
 use rayon::prelude::*;
-use turbopath::{AbsoluteSystemPathBuf, RelativeUnixPathBuf};
+use turbopath::{AbsoluteSystemPathBuf, AnchoredSystemPath, RelativeUnixPathBuf};
 use turborepo_repository::{
     discovery::PackageDiscoveryBuilder,
     package_graph::{PackageGraph, WorkspaceInfo, WorkspaceName},
@@ -20,6 +20,7 @@ use crate::{
     run::error::Error,
     task_graph::TaskDefinition,
     task_hash::PackageInputsHashes,
+    turbo_json::TurboJson,
     DaemonClient,
 };
 
@@ -54,8 +55,6 @@ impl<T: PackageHasher + Send> PackageHasherBuilder for T {
 pub struct LocalPackageHasherBuilder<PDB: PackageDiscoveryBuilder + Sync> {
     pub repo_root: AbsoluteSystemPathBuf,
     pub discovery: PDB,
-    pub root_package_json: PackageJson,
-    pub root_turbo_json: crate::turbo_json::TurboJson,
     pub scm: SCM,
 }
 
@@ -69,8 +68,18 @@ where
     type Error = std::convert::Infallible;
 
     async fn build(self) -> Result<Self::Output, Self::Error> {
+        let package_json_path = self.repo_root.join_component("package.json");
+        let root_package_json = PackageJson::load(&package_json_path).unwrap();
+        let root_turbo_json = TurboJson::load(
+            &self.repo_root,
+            AnchoredSystemPath::empty(),
+            &root_package_json,
+            false,
+        )
+        .unwrap();
+
         let pkg_dep_graph = {
-            PackageGraph::builder(&self.repo_root, self.root_package_json)
+            PackageGraph::builder(&self.repo_root, root_package_json)
                 .with_package_discovery(self.discovery)
                 .build()
                 .await
@@ -78,10 +87,10 @@ where
         };
 
         let engine = EngineBuilder::new(&self.repo_root, &pkg_dep_graph, false)
-            .with_root_tasks(self.root_turbo_json.pipeline.keys().cloned())
-            .with_tasks(self.root_turbo_json.pipeline.keys().cloned())
+            .with_root_tasks(root_turbo_json.pipeline.keys().cloned())
+            .with_tasks(root_turbo_json.pipeline.keys().cloned())
             .with_turbo_jsons(Some(
-                [(WorkspaceName::Root, self.root_turbo_json)]
+                [(WorkspaceName::Root, root_turbo_json)]
                     .into_iter()
                     .collect(),
             ))

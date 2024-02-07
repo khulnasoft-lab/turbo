@@ -95,23 +95,25 @@ impl FileWatching {
         backup_discovery: PD,
     ) -> Result<FileWatching, WatchError> {
         let watcher = Arc::new(FileSystemWatcher::new_with_default_cookie_dir(&repo_root)?);
+        let recv = watcher.watch();
+
         let cookie_jar = CookieJar::new(
             watcher.cookie_dir(),
             Duration::from_millis(100),
-            watcher.subscribe(),
+            recv.clone(),
         );
         let glob_watcher = Arc::new(GlobWatcher::new(
-            &repo_root,
+            repo_root.clone(),
             cookie_jar,
-            watcher.subscribe(),
+            recv.clone(),
         ));
         let package_watcher = Arc::new(
-            PackageWatcher::new(repo_root.clone(), watcher.subscribe(), backup_discovery)
+            PackageWatcher::new(repo_root.clone(), recv.clone(), backup_discovery)
                 .map_err(|e| WatchError::Setup(format!("{:?}", e)))?,
         );
         let package_hash_watcher = Arc::new(PackageHashWatcher::new(
             repo_root,
-            watcher.subscribe(),
+            recv,
             package_watcher.clone(),
         ));
 
@@ -240,12 +242,15 @@ where
         // well as available to the gRPC server itself to handle the shutdown RPC.
         let (trigger_shutdown, mut shutdown_signal) = mpsc::channel::<()>(1);
 
+        let scm = SCM::new(&repo_root);
+
         let package_discovery_backup = package_discovery_backup.build()?;
         let (service, exit_root_watch, watch_root_handle) = TurboGrpcServiceInner::new(
             package_discovery_backup,
             repo_root.clone(),
             trigger_shutdown,
             log_file,
+            scm,
         );
 
         let running = Arc::new(AtomicBool::new(true));
@@ -334,6 +339,7 @@ impl
         repo_root: AbsoluteSystemPathBuf,
         trigger_shutdown: mpsc::Sender<()>,
         log_file: AbsoluteSystemPathBuf,
+        scm: SCM,
     ) -> (
         Self,
         oneshot::Sender<()>,
@@ -356,24 +362,10 @@ impl
             root_watch_exit_signal,
         ));
 
-        let scm = SCM::new(&repo_root);
-
-        let package_json_path = repo_root.join_component("package.json");
-        let root_package_json = PackageJson::load(&package_json_path).unwrap();
-        let root_turbo_json = TurboJson::load(
-            &repo_root,
-            AnchoredSystemPath::empty(),
-            &root_package_json,
-            false,
-        )
-        .unwrap();
-
         let local_package_hash_builder = LocalPackageHasherBuilder {
-            scm: scm.clone(),
+            scm,
             discovery: package_discovery.clone(),
             repo_root: repo_root.clone(),
-            root_package_json: root_package_json.clone(),
-            root_turbo_json: root_turbo_json.clone(),
         };
 
         tracing::debug!("initing package hash watcher");
@@ -463,7 +455,12 @@ async fn watch_root(
     trigger_shutdown: mpsc::Sender<()>,
     mut exit_signal: oneshot::Receiver<()>,
 ) -> Result<(), WatchError> {
-    let mut recv_events = filewatching.watcher.subscribe();
+    let mut recv_events = filewatching
+        .watcher
+        .subscribe()
+        .await
+        // we can only encounter an error here if the file watcher is closed (a recv error)
+        .map_err(|_| WatchError::Setup("file watching shut down".to_string()))?;
 
     loop {
         // Ignore the outer layer of Result, if the sender has closed, filewatching has

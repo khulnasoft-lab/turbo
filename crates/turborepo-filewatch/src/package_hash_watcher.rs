@@ -11,7 +11,7 @@ use turborepo_repository::{
 
 use crate::{
     package_watcher::{PackageWatcher, WatchingPackageDiscovery},
-    NotifyError,
+    NotifyError, OptionalWatch,
 };
 
 pub struct PackageHashWatcher {
@@ -32,7 +32,7 @@ pub struct FileHashes(pub HashMap<turbopath::RelativeUnixPathBuf, String>);
 impl PackageHashWatcher {
     pub fn new(
         repo_root: AbsoluteSystemPathBuf,
-        recv: broadcast::Receiver<Result<Event, NotifyError>>,
+        recv: OptionalWatch<broadcast::Receiver<Result<Event, NotifyError>>>,
         package_watcher: Arc<PackageWatcher>,
     ) -> Self {
         let (_exit_tx, exit_rx) = oneshot::channel();
@@ -64,7 +64,7 @@ impl PackageHashWatcher {
 
 struct Subscriber {
     exit_rx: oneshot::Receiver<()>,
-    recv: broadcast::Receiver<Result<Event, NotifyError>>,
+    recv: OptionalWatch<broadcast::Receiver<Result<Event, NotifyError>>>,
     package_watcher: Arc<PackageWatcher>,
     repo_root: AbsoluteSystemPathBuf,
 }
@@ -74,7 +74,7 @@ struct Subscriber {
 impl Subscriber {
     fn new(
         exit_rx: oneshot::Receiver<()>,
-        recv: broadcast::Receiver<Result<Event, NotifyError>>,
+        recv: OptionalWatch<broadcast::Receiver<Result<Event, NotifyError>>>,
         package_watcher: Arc<PackageWatcher>,
         repo_root: AbsoluteSystemPathBuf,
     ) -> Self {
@@ -138,38 +138,37 @@ impl Subscriber {
             }
         };
 
-        let handle_file_update = {
-            async move {
-                while let Ok(Ok(event)) = self.recv.recv().into_future().await {
-                    match event.kind {
-                        EventKind::Any | EventKind::Access(_) | EventKind::Other => {
-                            // no-op
-                        }
-                        _ => {
-                            let package_graph =
-                                package_graph_rx.wait_for(|f| f.is_some()).await.unwrap();
-                            let package_graph = package_graph.as_ref().expect("checked");
-                            let change_mapper = ChangeMapper::new(package_graph, vec![], vec![]);
-                            let _changed_packages = change_mapper
-                                .changed_packages(
-                                    event
-                                        .paths
-                                        .into_iter()
-                                        .map(|p| {
-                                            AnchoredSystemPathBuf::new(
-                                                &self.repo_root,
-                                                AbsoluteSystemPathBuf::new(p.to_string_lossy())
-                                                    .unwrap(),
-                                            )
-                                            .unwrap()
-                                        })
-                                        .collect(),
-                                    None,
-                                )
-                                .unwrap();
+        let handle_file_update = async move {
+            let mut recv = self.recv.get().await.unwrap().resubscribe();
+            while let Ok(Ok(event)) = recv.recv().await {
+                match event.kind {
+                    EventKind::Any | EventKind::Access(_) | EventKind::Other => {
+                        // no-op
+                    }
+                    _ => {
+                        let package_graph =
+                            package_graph_rx.wait_for(|f| f.is_some()).await.unwrap();
+                        let package_graph = package_graph.as_ref().expect("checked");
+                        let change_mapper = ChangeMapper::new(package_graph, vec![], vec![]);
+                        let _changed_packages = change_mapper
+                            .changed_packages(
+                                event
+                                    .paths
+                                    .into_iter()
+                                    .map(|p| {
+                                        AnchoredSystemPathBuf::new(
+                                            &self.repo_root,
+                                            AbsoluteSystemPathBuf::new(p.to_string_lossy())
+                                                .unwrap(),
+                                        )
+                                        .unwrap()
+                                    })
+                                    .collect(),
+                                None,
+                            )
+                            .unwrap();
 
-                            todo!("send the update")
-                        }
+                        todo!("send the update")
                     }
                 }
             }

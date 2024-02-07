@@ -85,14 +85,14 @@ impl PackageWatcher {
     /// Creates a new package watcher whose current package data can be queried.
     pub fn new<T: PackageDiscovery + Send + 'static>(
         root: AbsoluteSystemPathBuf,
-        recv: broadcast::Receiver<Result<Event, NotifyError>>,
+        recv: OptionalWatch<broadcast::Receiver<Result<Event, NotifyError>>>,
         backup_discovery: T,
     ) -> Result<Self, package_manager::Error> {
         let (exit_tx, exit_rx) = oneshot::channel();
-        let subscriber = Subscriber::new(exit_rx, root, recv, backup_discovery)?;
+        let subscriber = Subscriber::new(root, recv, backup_discovery)?;
         let manager_rx = subscriber.manager_receiver();
         let package_data = subscriber.package_data();
-        let handle = tokio::spawn(subscriber.watch());
+        let handle = tokio::spawn(subscriber.watch(exit_rx));
         Ok(Self {
             _exit_tx: exit_tx,
             _handle: handle,
@@ -154,8 +154,7 @@ impl PackageWatcher {
 /// The underlying task that listens to file system events and updates the
 /// internal package state.
 struct Subscriber<T: PackageDiscovery> {
-    exit_rx: oneshot::Receiver<()>,
-    recv: broadcast::Receiver<Result<Event, NotifyError>>,
+    recv: OptionalWatch<broadcast::Receiver<Result<Event, NotifyError>>>,
     backup_discovery: Arc<AsyncMutex<T>>,
 
     repo_root: AbsoluteSystemPathBuf,
@@ -181,9 +180,8 @@ struct PackageManagerState {
 
 impl<T: PackageDiscovery + Send + 'static> Subscriber<T> {
     fn new(
-        exit_rx: oneshot::Receiver<()>,
         repo_root: AbsoluteSystemPathBuf,
-        recv: broadcast::Receiver<Result<Event, NotifyError>>,
+        recv: OptionalWatch<broadcast::Receiver<Result<Event, NotifyError>>>,
         backup_discovery: T,
     ) -> Result<Self, Error> {
         let (package_data_tx, package_data_rx) = OptionalWatch::new();
@@ -245,7 +243,6 @@ impl<T: PackageDiscovery + Send + 'static> Subscriber<T> {
         });
 
         Ok(Self {
-            exit_rx,
             recv,
             backup_discovery,
             repo_root,
@@ -271,25 +268,21 @@ impl<T: PackageDiscovery + Send + 'static> Subscriber<T> {
         receiver.get().await.map(|x| x.subscribe())
     }
 
-    async fn watch(mut self) {
+    async fn watch(mut self, exit_rx: oneshot::Receiver<()>) {
         // initialize the contents
         self.rediscover_packages().await;
 
-        // respond to changes
-        loop {
-            tokio::select! {
-                biased;
-                _ = &mut self.exit_rx => {
-                    tracing::info!("exiting package watcher");
-                    return
-                },
-                file_event = self.recv.recv().into_future() => match file_event {
+        let process = async move {
+            let mut recv = self.recv.get().await.unwrap().resubscribe();
+            loop {
+                let file_event = recv.recv().await;
+                match file_event {
                     Ok(Ok(event)) => match self.handle_file_event(&event).await {
-                        Ok(()) => {},
+                        Ok(()) => {}
                         Err(()) => {
                             tracing::debug!("package watching is closing, exiting");
                             return;
-                        },
+                        }
                     },
                     // if we get an error, we need to re-discover the packages
                     Ok(Err(_)) => self.rediscover_packages().await,
@@ -298,8 +291,20 @@ impl<T: PackageDiscovery + Send + 'static> Subscriber<T> {
                     Err(RecvError::Lagged(count)) => {
                         tracing::warn!("lagged behind {count} processing file watching events");
                         self.rediscover_packages().await;
-                    },
+                    }
                 }
+            }
+        };
+
+        // respond to changes
+
+        tokio::select! {
+            biased;
+            _ = exit_rx => {
+                tracing::debug!("exiting package watcher due to signal");
+            },
+            _ = process => {
+                tracing::debug!("exiting package watcher due to process end");
             }
         }
     }
@@ -594,6 +599,7 @@ mod test {
     };
 
     use super::Subscriber;
+    use crate::OptionalWatch;
 
     #[derive(Debug)]
     struct MockDiscovery {
@@ -616,6 +622,7 @@ mod test {
         let tmp = tempfile::tempdir().unwrap();
 
         let (tx, rx) = broadcast::channel(10);
+        let rx = OptionalWatch::once(rx);
         let (_exit_tx, exit_rx) = tokio::sync::oneshot::channel();
 
         let root = AbsoluteSystemPathBuf::new(tmp.path().to_string_lossy()).unwrap();
@@ -656,11 +663,11 @@ mod test {
             package_data: Arc::new(Mutex::new(package_data)),
         };
 
-        let subscriber = Subscriber::new(exit_rx, root.clone(), rx, mock_discovery).unwrap();
+        let subscriber = Subscriber::new(root.clone(), rx, mock_discovery).unwrap();
 
         let mut package_data = subscriber.package_data();
 
-        let _handle = tokio::spawn(subscriber.watch());
+        let _handle = tokio::spawn(subscriber.watch(exit_rx));
 
         tx.send(Ok(notify::Event {
             kind: notify::EventKind::Create(notify::event::CreateKind::File),
@@ -742,6 +749,7 @@ mod test {
         let tmp = tempfile::tempdir().unwrap();
 
         let (tx, rx) = broadcast::channel(10);
+        let rx = OptionalWatch::once(rx);
         let (_exit_tx, exit_rx) = tokio::sync::oneshot::channel();
 
         let root = AbsoluteSystemPathBuf::new(tmp.path().to_string_lossy()).unwrap();
@@ -791,11 +799,11 @@ mod test {
             package_data: package_data_raw.clone(),
         };
 
-        let subscriber = Subscriber::new(exit_rx, root.clone(), rx, mock_discovery).unwrap();
+        let subscriber = Subscriber::new(root.clone(), rx, mock_discovery).unwrap();
 
         let mut package_data = subscriber.package_data();
 
-        let _handle = tokio::spawn(subscriber.watch());
+        let _handle = tokio::spawn(subscriber.watch(exit_rx));
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 

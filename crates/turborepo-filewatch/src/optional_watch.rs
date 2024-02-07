@@ -17,6 +17,12 @@ impl<T> OptionalWatch<T> {
         (tx, OptionalWatch(rx))
     }
 
+    /// Create a new `OptionalWatch` with an initial, unchanging value.
+    pub fn once(init: T) -> Self {
+        let (_tx, rx) = watch::channel(Some(init));
+        OptionalWatch(rx)
+    }
+
     /// Wait for the value to be available and then return it.
     pub async fn get(&mut self) -> Result<SomeRef<'_, T>, RecvError> {
         let recv = self.0.wait_for(|f| f.is_some()).await?;

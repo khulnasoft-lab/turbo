@@ -340,6 +340,7 @@ impl RawTurboJson {
         path: &AnchoredSystemPath,
     ) -> Result<RawTurboJson, Error> {
         let absolute_path = repo_root.resolve(path);
+        tracing::debug!("loading turbo.json from {}", absolute_path);
         let contents = absolute_path.read_to_string()?;
         let raw_turbo_json = RawTurboJson::parse(&contents, path)?;
 

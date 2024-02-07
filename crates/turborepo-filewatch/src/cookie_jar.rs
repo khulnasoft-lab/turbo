@@ -9,13 +9,13 @@ use std::{
 use notify::{Event, EventKind};
 use thiserror::Error;
 use tokio::{
-    sync::{broadcast, oneshot},
+    sync::{broadcast, oneshot, watch},
     time::error::Elapsed,
 };
 use tracing::{debug, trace};
 use turbopath::{AbsoluteSystemPath, AbsoluteSystemPathBuf, PathRelation};
 
-use crate::NotifyError;
+use crate::{NotifyError, OptionalWatch};
 
 #[derive(Clone, Debug, Error)]
 pub enum WatchError {
@@ -48,7 +48,7 @@ pub struct CookieJar {
     root: AbsoluteSystemPathBuf,
     serial: AtomicUsize,
     timeout: Duration,
-    watches: Arc<Mutex<Watches>>,
+    watches: OptionalWatch<Arc<Mutex<Watches>>>,
     // _exit_ch exists to trigger a close on the receiver when an instance
     // of this struct is dropped. The task that is receiving events will exit,
     // dropping the other sender for the broadcast channel, causing all receivers
@@ -66,13 +66,19 @@ impl CookieJar {
     pub fn new(
         root: &AbsoluteSystemPath,
         timeout: Duration,
-        file_events: broadcast::Receiver<Result<Event, NotifyError>>,
+        file_events: OptionalWatch<broadcast::Receiver<Result<Event, NotifyError>>>,
     ) -> Self {
         let (exit_ch, exit_signal) = tokio::sync::oneshot::channel();
-        let watches = Arc::new(Mutex::new(Watches::default()));
+
+        // before we can wait for cookies, we need file watching to be ready, otherwise
+        // we may miss the event or time out just waiting for it to be online. by making
+        // watches a data dependency that the task supplies once it's ready, we can
+        // ensure that that requirement is upheld
+        let (watches_tx, watches_rx) = OptionalWatch::new();
+
         tokio::spawn(watch_cookies(
             root.to_owned(),
-            watches.clone(),
+            watches_tx,
             file_events,
             exit_signal,
         ));
@@ -80,19 +86,25 @@ impl CookieJar {
             root: root.to_owned(),
             serial: AtomicUsize::new(0),
             timeout,
-            watches,
+            watches: watches_rx,
             _exit_ch: exit_ch,
         }
     }
 
     pub async fn wait_for_cookie(&self) -> Result<(), CookieError> {
+        let watches = {
+            let mut watches = self.watches.clone();
+            let watches = watches.get().await.unwrap();
+            watches.clone()
+        };
+
         let serial = self
             .serial
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let cookie_path = self.root.join_component(&format!("{}.cookie", serial));
         let (tx, rx) = oneshot::channel();
         {
-            let mut watches = self.watches.lock().expect("mutex poisoned");
+            let mut watches = watches.lock().expect("mutex poisoned");
             if watches.closed {
                 return Err(CookieError::Watch(WatchError::Closed));
             }
@@ -121,62 +133,72 @@ impl CookieJar {
 
 async fn watch_cookies(
     root: AbsoluteSystemPathBuf,
-    watches: Arc<Mutex<Watches>>,
-    mut file_events: broadcast::Receiver<Result<Event, NotifyError>>,
+    watches_tx: watch::Sender<Option<Arc<Mutex<Watches>>>>,
+    mut file_events: OptionalWatch<broadcast::Receiver<Result<Event, NotifyError>>>,
     mut exit_signal: tokio::sync::oneshot::Receiver<()>,
 ) {
-    loop {
-        tokio::select! {
-            _ = &mut exit_signal => return,
-            event = file_events.recv() => {
-                match flatten_event(event) {
-                    Ok(event) => {
-                        if matches!(event.kind, EventKind::Create(_)) {
-                            let mut watches = watches.lock().expect("mutex poisoned");
-                            for path in event.paths {
-                                let abs_path: &AbsoluteSystemPath = path
-                                    .as_path()
-                                    .try_into()
-                                    .expect("Non-absolute path from filewatching");
-                                if root.relation_to_path(abs_path) == PathRelation::Parent {
-                                    trace!("saw cookie: {}", abs_path);
-                                    if let Some(responder) = watches.cookies.remove(&path) {
-                                        if responder.send(Ok(())).is_err() {
-                                            // Note that cookie waiters will time out if they don't get a
-                                            // response, so we don't necessarily
-                                            // need to panic here, although we could decide to do that in the
-                                            // future.
-                                            debug!("failed to notify cookie waiter of cookie success");
-                                        }
+    let process = async move {
+        let mut file_events = file_events.get().await.unwrap().resubscribe();
+        let watches = Arc::new(Mutex::new(Watches::default()));
+
+        watches_tx.send(Some(watches.clone())).unwrap();
+
+        loop {
+            let event = file_events.recv().await;
+            match flatten_event(event) {
+                Ok(event) => {
+                    if matches!(event.kind, EventKind::Create(_)) {
+                        let mut watches = watches.lock().expect("mutex poisoned");
+                        for path in event.paths {
+                            let abs_path: &AbsoluteSystemPath = path
+                                .as_path()
+                                .try_into()
+                                .expect("Non-absolute path from filewatching");
+                            if root.relation_to_path(abs_path) == PathRelation::Parent {
+                                trace!("saw cookie: {}", abs_path);
+                                if let Some(responder) = watches.cookies.remove(&path) {
+                                    if responder.send(Ok(())).is_err() {
+                                        // Note that cookie waiters will time out if they don't get
+                                        // a response, so we
+                                        // don't necessarily
+                                        // need to panic here, although we could decide to do that
+                                        // in the future.
+                                        debug!("failed to notify cookie waiter of cookie success");
                                     }
                                 }
                             }
                         }
                     }
-                    Err(e) => {
-                        // we got an error, notify all waiters that their cookie failed
-                        let is_closing = matches!(
-                            e,
-                            WatchError::RecvError(broadcast::error::RecvError::Closed)
-                        );
-                        let resp = if is_closing { WatchError::Closed } else { e };
-                        let mut watches = watches.lock().expect("mutex poisoned");
-                        for (_, sender) in watches.cookies.drain() {
-                            if sender.send(Err(resp.clone())).is_err() {
-                                // Note that cookie waiters will time out if they don't get a response, so
-                                // we don't necessarily need to panic here, although
-                                // we could decide to do that in the future.
-                                debug!("failed to notify cookie waiter of error: {}", resp);
-                            }
+                }
+                Err(e) => {
+                    // we got an error, notify all waiters that their cookie failed
+                    let is_closing = matches!(
+                        e,
+                        WatchError::RecvError(broadcast::error::RecvError::Closed)
+                    );
+                    let resp = if is_closing { WatchError::Closed } else { e };
+                    let mut watches = watches.lock().expect("mutex poisoned");
+                    for (_, sender) in watches.cookies.drain() {
+                        if sender.send(Err(resp.clone())).is_err() {
+                            // Note that cookie waiters will time out if they don't get a response,
+                            // so we don't necessarily need to panic
+                            // here, although we could decide to do that
+                            // in the future.
+                            debug!("failed to notify cookie waiter of error: {}", resp);
                         }
-                        if is_closing {
-                            watches.closed = true;
-                            return;
-                        }
+                    }
+                    if is_closing {
+                        watches.closed = true;
+                        return;
                     }
                 }
             }
         }
+    };
+
+    tokio::select! {
+        _ = &mut exit_signal => {},
+        _ = process => {},
     }
 }
 
@@ -198,15 +220,22 @@ mod test {
 
     use crate::{
         cookie_jar::{CookieError, CookieJar, WatchError},
-        NotifyError,
+        NotifyError, OptionalWatch,
     };
 
     async fn ensure_tracked(cookie_jar: &CookieJar, path: &AbsoluteSystemPath) {
         let path = path.as_std_path();
         let mut interval = time::interval(Duration::from_millis(2));
+
+        let watches = {
+            let mut watches = cookie_jar.watches.clone();
+            let watches = watches.get().await.unwrap();
+            watches.clone()
+        };
+
         for _i in 0..50 {
             interval.tick().await;
-            let watches = cookie_jar.watches.lock().expect("mutex poisoned");
+            let watches = watches.lock().expect("mutex poisoned");
             if watches.cookies.contains_key(path) {
                 return;
             }
@@ -223,6 +252,7 @@ mod test {
             .unwrap();
 
         let (send_file_events, file_events) = broadcast::channel(16);
+        let file_events = OptionalWatch::once(file_events);
 
         let cookie_jar = CookieJar::new(&path, Duration::from_millis(100), file_events);
         let cookie_path = path.join_component("0.cookie");
@@ -250,6 +280,7 @@ mod test {
             .unwrap();
 
         let (send_file_events, file_events) = broadcast::channel(16);
+        let file_events = OptionalWatch::once(file_events);
 
         let cookie_jar = CookieJar::new(&path, Duration::from_millis(1000), file_events);
         tokio_scoped::scope(|scope| {
@@ -275,6 +306,7 @@ mod test {
             .unwrap();
 
         let (_send_file_events, file_events) = broadcast::channel(16);
+        let file_events = OptionalWatch::once(file_events);
 
         let cookie_jar = CookieJar::new(&path, Duration::from_millis(10), file_events);
         tokio_scoped::scope(|scope| {
@@ -296,6 +328,7 @@ mod test {
             .unwrap();
 
         let (send_file_events, file_events) = broadcast::channel(16);
+        let file_events = OptionalWatch::once(file_events);
 
         let cookie_jar = CookieJar::new(&path, Duration::from_millis(10), file_events);
         let cookie_path = path.join_component("0.cookie");
