@@ -107,6 +107,8 @@ impl Subscriber {
                 loop {
                     let packages = {
                         let changes = packages_rx.get().await.unwrap();
+                        tracing::debug!("package changed, recalculating hashes");
+
                         changes
                             .as_inner()
                             .iter()
@@ -140,6 +142,8 @@ impl Subscriber {
 
         let handle_file_update = async move {
             let mut recv = self.recv.get().await.unwrap().resubscribe();
+            tracing::debug!("package hash watcher ready");
+
             while let Ok(Ok(event)) = recv.recv().await {
                 match event.kind {
                     EventKind::Any | EventKind::Access(_) | EventKind::Other => {

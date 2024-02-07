@@ -106,6 +106,8 @@ impl FileSystemWatcher {
         root: &AbsoluteSystemPath,
         cookie_dir: AbsoluteSystemPathBuf,
     ) -> Result<Self, WatchError> {
+        tracing::debug!("initing file-system watcher");
+
         if root.relation_to_path(&cookie_dir) != PathRelation::Parent {
             return Err(WatchError::Setup(format!(
                 "Invalid cookie directory: {} does not contain {}",
@@ -167,6 +169,8 @@ impl FileSystemWatcher {
 fn setup_cookie_dir(cookie_dir: &AbsoluteSystemPath) -> Result<(), WatchError> {
     // We need to ensure that the cookie directory is cleared out first so
     // that we can start over with cookies.
+    tracing::debug!("setting up the cookie dir");
+
     if cookie_dir.exists() {
         cookie_dir.remove_dir_all().map_err(|e| {
             WatchError::Setup(format!("failed to clear cookie dir {}: {}", cookie_dir, e))

@@ -292,8 +292,9 @@ where
         };
         // Wait for the server to exit.
         // This can be triggered by timeout, root watcher, or an RPC
+        tracing::debug!("starting server");
         let _ = server_fut.await;
-        info!("gRPC server exited");
+        tracing::debug!("server exited");
         // Ensure our timer will exit
         running.store(false, Ordering::SeqCst);
         // We expect to have a signal from the grpc server on what triggered the exit
@@ -347,6 +348,7 @@ impl
     ) {
         let file_watching = FileWatching::new(repo_root.clone(), package_discovery_backup).unwrap();
 
+        tracing::debug!("initing package discovery");
         let package_discovery = Arc::new(WatchingPackageDiscovery::new(
             file_watching.package_watcher.clone(),
         ));

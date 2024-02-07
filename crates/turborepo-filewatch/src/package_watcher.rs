@@ -274,6 +274,7 @@ impl<T: PackageDiscovery + Send + 'static> Subscriber<T> {
 
         let process = async move {
             let mut recv = self.recv.get().await.unwrap().resubscribe();
+            tracing::debug!("package watcher ready");
             loop {
                 let file_event = recv.recv().await;
                 match file_event {
