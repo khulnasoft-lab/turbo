@@ -52,14 +52,12 @@ impl PackageDiscovery for WatchingPackageDiscovery {
         let package_manager = self
             .watcher
             .get_package_manager()
-            .map(Result::ok)
-            .flatten()
+            .and_then(Result::ok)
             .ok_or(discovery::Error::Unavailable)?;
         let workspaces = self
             .watcher
             .get_package_data()
-            .map(Result::ok)
-            .flatten()
+            .and_then(Result::ok)
             .ok_or(discovery::Error::Unavailable)?;
 
         Ok(DiscoveryResponse {
@@ -345,16 +343,16 @@ impl<T: PackageDiscovery + Send + 'static> Subscriber<T> {
             }
         }
 
-        match self.have_workspace_globs_changed(&file_event).await {
+        match self.have_workspace_globs_changed(file_event).await {
             Ok(true) => {
                 self.rediscover_packages().await;
                 Ok(())
             }
             Ok(false) => {
                 // it is the end of the function so we are going to return regardless
-                self.handle_package_json_change(&file_event).await
+                self.handle_package_json_change(file_event).await
             }
-            Err(()) => return Err(()),
+            Err(()) => Err(()),
         }
     }
 
@@ -604,7 +602,7 @@ mod test {
     }
 
     impl super::PackageDiscovery for MockDiscovery {
-        async fn discover_packages(&mut self) -> Result<DiscoveryResponse, discovery::Error> {
+        async fn discover_packages(&self) -> Result<DiscoveryResponse, discovery::Error> {
             Ok(DiscoveryResponse {
                 package_manager: self.manager,
                 workspaces: self.package_data.lock().unwrap().clone(),

@@ -710,8 +710,8 @@ mod tests {
             .unwrap()
         };
 
-        let inc = inc.into_iter().map(to_path).collect::<Vec<_>>();
-        let expected = expected.into_iter().map(to_path).collect::<Vec<_>>();
+        let inc = inc.iter().map(to_path).collect::<Vec<_>>();
+        let expected = expected.iter().map(to_path).collect::<Vec<_>>();
         let sorted = filter_subfolder_package_jsons(inc);
         let sorted = sorted.collect::<Vec<_>>();
         assert_eq!(sorted, expected);

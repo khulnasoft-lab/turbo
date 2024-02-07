@@ -9,12 +9,8 @@
 //! these strategies will implement some sort of monad-style composition so that
 //! we can track areas of run that are performing suboptimally.
 
-use std::{
-    future::Future,
-    sync::{Arc, Mutex, OnceLock},
-};
+use std::sync::Arc;
 
-use tokio::sync::MutexGuard;
 use tokio_stream::{iter, StreamExt};
 use turbopath::AbsoluteSystemPathBuf;
 
@@ -318,8 +314,8 @@ mod fallback_tests {
             assert!(result.is_ok());
 
             // Assert that the fallback was used
-            assert_eq!(discovery.primary.calls, 0);
-            assert_eq!(discovery.fallback.calls, 1);
+            assert_eq!(*discovery.primary.calls.get_mut(), 0);
+            assert_eq!(*discovery.fallback.calls.get_mut(), 1);
         });
     }
 
@@ -340,25 +336,27 @@ mod fallback_tests {
             assert!(result.is_ok());
 
             // Assert that the fallback was used
-            assert_eq!(discovery.primary.calls, 0);
-            assert_eq!(discovery.fallback.calls, 1);
+            assert_eq!(*discovery.primary.calls.get_mut(), 0);
+            assert_eq!(*discovery.fallback.calls.get_mut(), 1);
         });
     }
 }
 
 #[cfg(test)]
 mod caching_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use tokio::runtime::Runtime;
 
     use super::*;
 
     struct MockPackageDiscovery {
-        call_count: usize,
+        call_count: AtomicUsize,
     }
 
     impl PackageDiscovery for MockPackageDiscovery {
-        async fn discover_packages(&mut self) -> Result<DiscoveryResponse, Error> {
-            self.call_count += 1;
+        async fn discover_packages(&self) -> Result<DiscoveryResponse, Error> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
             // Simulate successful package discovery
             Ok(DiscoveryResponse {
                 package_manager: PackageManager::Npm,
@@ -371,16 +369,18 @@ mod caching_tests {
     fn test_caching_package_discovery() {
         let rt = Runtime::new().unwrap();
         rt.block_on(async {
-            let primary = MockPackageDiscovery { call_count: 0 };
+            let primary = MockPackageDiscovery {
+                call_count: Default::default(),
+            };
             let mut discovery = CachingPackageDiscovery::new(primary);
 
             // First call should use primary discovery
             let _first_result = discovery.discover_packages().await.unwrap();
-            assert_eq!(discovery.primary.call_count, 1);
+            assert_eq!(*discovery.primary.call_count.get_mut(), 1);
 
             // Second call should use cached data and not increase call count
             let _second_result = discovery.discover_packages().await.unwrap();
-            assert_eq!(discovery.primary.call_count, 1);
+            assert_eq!(*discovery.primary.call_count.get_mut(), 1);
         });
     }
 }

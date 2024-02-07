@@ -149,7 +149,7 @@ impl Subscriber {
                             let package_graph =
                                 package_graph_rx.wait_for(|f| f.is_some()).await.unwrap();
                             let package_graph = package_graph.as_ref().expect("checked");
-                            let change_mapper = ChangeMapper::new(&package_graph, vec![], vec![]);
+                            let change_mapper = ChangeMapper::new(package_graph, vec![], vec![]);
                             let _changed_packages = change_mapper
                                 .changed_packages(
                                     event
@@ -177,9 +177,7 @@ impl Subscriber {
 
         tokio::select! {
             biased;
-            _ = &mut self.exit_rx => {
-                return;
-            }
+            _ = &mut self.exit_rx => {}
             _ = handle_file_update => {}
             _ = handle_package_changes => {}
         }

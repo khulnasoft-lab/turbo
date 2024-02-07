@@ -1,10 +1,7 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use futures::{FutureExt, StreamExt};
-use tokio::{
-    sync::{watch::error::RecvError, Mutex},
-    time::error::Elapsed,
-};
+use tokio::{sync::watch::error::RecvError, time::error::Elapsed};
 use turborepo_filewatch::OptionalWatch;
 use turborepo_repository::discovery::{PackageDiscovery, PackageDiscoveryBuilder};
 use turborepo_telemetry::events::generic::GenericEventBuilder;
@@ -41,7 +38,7 @@ enum WaitError {
 impl<PD, PH: PackageHasher + Send + Sync + 'static> WatchingPackageHasher<PD, PH> {
     pub fn new<PHB: PackageHasherBuilder<Output = PH> + Send + 'static>(
         package_discovery: PD,
-        mut fallback: PHB,
+        fallback: PHB,
         interval: Duration,
         file_watching: FileWatching,
     ) -> Self {
@@ -56,7 +53,7 @@ impl<PD, PH: PackageHasher + Send + Sync + 'static> WatchingPackageHasher<PD, PH
             let file_watching = file_watching.clone();
             let hashes_tx = hashes_tx.clone();
             async move {
-                let mut hasher = fallback.build().await.unwrap();
+                let hasher = fallback.build().await.unwrap();
 
                 let data = hasher
                     .calculate_hashes(Default::default())
@@ -68,8 +65,8 @@ impl<PD, PH: PackageHasher + Send + Sync + 'static> WatchingPackageHasher<PD, PH
                 hashes_tx.send(Some(data));
 
                 let mut stream = file_watching.package_hash_watcher.subscribe();
-                while let Some(update) = stream.next().await {
-                    hashes_tx.send_modify(|d| {
+                while let Some(_update) = stream.next().await {
+                    hashes_tx.send_modify(|_d| {
                         todo!();
                         // d.insert(
                         //     TaskId::new(&update.package,

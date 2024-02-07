@@ -59,14 +59,14 @@ impl Workspace {
             })?;
         let workspace_state = WorkspaceState::infer(&reference_dir)?;
         let is_multi_package = workspace_state.mode == WorkspaceType::MultiPackage;
-        let package_manager_name = workspace_state
-            .package_manager
-            .as_ref()
-            .map_err(|error| Error::PackageManager {
-                error: error.to_string(),
-                path: workspace_state.root.clone(),
-            })?
-            .clone();
+        let package_manager_name =
+            *workspace_state
+                .package_manager
+                .as_ref()
+                .map_err(|error| Error::PackageManager {
+                    error: error.to_string(),
+                    path: workspace_state.root.clone(),
+                })?;
         Ok(Self {
             absolute_path: workspace_state.root.to_string(),
             workspace_state,

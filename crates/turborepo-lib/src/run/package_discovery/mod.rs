@@ -1,14 +1,7 @@
-use std::sync::Arc;
-
-use tokio::{
-    join,
-    sync::{watch::Receiver, Mutex},
-};
 use turbopath::AbsoluteSystemPathBuf;
-use turborepo_filewatch::package_watcher::PackageWatcher;
 use turborepo_repository::discovery::{DiscoveryResponse, Error, PackageDiscovery, WorkspaceData};
 
-use crate::daemon::{proto::PackageManager, DaemonClient, FileWatching};
+use crate::daemon::{proto::PackageManager, DaemonClient};
 
 #[derive(Debug)]
 pub struct DaemonPackageDiscovery<C> {

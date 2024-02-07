@@ -234,7 +234,7 @@ impl Run {
         let is_ci_or_not_tty = turborepo_ci::is_ci() || !std::io::stdout().is_terminal();
         run_telemetry.track_ci(turborepo_ci::Vendor::get_name());
 
-        let mut daemon = match (is_ci_or_not_tty, self.opts.run_opts.daemon) {
+        let daemon = match (is_ci_or_not_tty, self.opts.run_opts.daemon) {
             (true, None) => {
                 run_telemetry.track_daemon_init(DaemonInitStatus::Skipped);
                 debug!("skipping turbod since we appear to be in a non-interactive context");
@@ -409,7 +409,7 @@ impl Run {
             )
         };
 
-        let mut package_hasher = FallbackPackageHasher::new(
+        let package_hasher = FallbackPackageHasher::new(
             daemon.clone().map(DaemonPackageHasher::new),
             fallback,
             duration,

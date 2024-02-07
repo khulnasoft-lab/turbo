@@ -14,6 +14,16 @@ pub struct UpdatingHashMap<K, V>(
     tokio::sync::broadcast::Sender<(K, HashmapEvent<V>)>,
 );
 
+impl<K, V> Default for UpdatingHashMap<K, V>
+where
+    K: Eq + PartialEq + Hash + Clone,
+    V: Clone + PartialEq,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<K, V> UpdatingHashMap<K, V>
 where
     K: Eq + PartialEq + Hash + Clone,
@@ -39,7 +49,7 @@ where
     }
 
     pub fn remove(&mut self, key: K) -> Option<SendError<(K, HashmapEvent<V>)>> {
-        if let Some(_) = self.0.remove(&key) {
+        if self.0.remove(&key).is_some() {
             self.1.send((key, HashmapEvent::Remove)).err()
         } else {
             None
@@ -108,9 +118,9 @@ mod tests {
 
     use super::*;
 
-    fn run_test<T>(test: T) -> ()
+    fn run_test<T>(test: T)
     where
-        T: FnOnce() -> () + Send + 'static,
+        T: FnOnce() + Send + 'static,
     {
         let rt = Runtime::new().unwrap();
         rt.block_on(async { test() });

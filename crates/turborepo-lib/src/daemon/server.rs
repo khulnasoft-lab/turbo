@@ -27,7 +27,7 @@ use semver::Version;
 use thiserror::Error;
 use tokio::{
     select,
-    sync::{mpsc, oneshot, watch, Mutex as AsyncMutex},
+    sync::{mpsc, oneshot, watch},
     task::JoinHandle,
 };
 use tonic::transport::{NamedService, Server};
@@ -39,11 +39,10 @@ use turborepo_filewatch::{
     globwatcher::{Error as GlobWatcherError, GlobError, GlobSet, GlobWatcher},
     package_hash_watcher::PackageHashWatcher,
     package_watcher::{PackageWatcher, WatchingPackageDiscovery},
-    FileSystemWatcher, OptionalWatch, WatchError,
+    FileSystemWatcher, WatchError,
 };
 use turborepo_repository::{
     discovery::{LocalPackageDiscoveryBuilder, PackageDiscovery, PackageDiscoveryBuilder},
-    package_graph::{PackageGraph, WorkspaceName},
     package_json::PackageJson,
 };
 use turborepo_scm::SCM;
@@ -56,7 +55,6 @@ use super::{
 };
 use crate::{
     daemon::{bump_timeout_layer::BumpTimeoutLayer, endpoint::listen_socket},
-    engine::EngineBuilder,
     run::package_hashes::{
         watch::WatchingPackageHasher, LocalPackageHasherBuilder, LocalPackageHashes, PackageHasher,
     },
@@ -737,7 +735,7 @@ mod test {
     struct MockDiscovery;
     impl PackageDiscovery for MockDiscovery {
         async fn discover_packages(
-            &mut self,
+            &self,
         ) -> Result<
             turborepo_repository::discovery::DiscoveryResponse,
             turborepo_repository::discovery::Error,

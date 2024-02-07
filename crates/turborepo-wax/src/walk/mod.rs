@@ -1084,7 +1084,6 @@ mod tests {
 
     use build_fs_tree::{dir, file, Build, FileSystemTree};
     use path_slash::PathBufExt;
-    use regex::Regex;
     use tempfile::{self, TempDir};
 
     use crate::{

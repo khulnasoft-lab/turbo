@@ -315,7 +315,7 @@ impl<'a, T: PackageDiscovery> BuildState<'a, ResolvedPackageManager, T> {
             workspace_graph,
             node_lookup,
             lockfile,
-            mut package_discovery,
+            package_discovery,
             ..
         } = self;
 
@@ -757,7 +757,7 @@ mod test {
     struct MockDiscovery;
     impl PackageDiscovery for MockDiscovery {
         async fn discover_packages(
-            &mut self,
+            &self,
         ) -> Result<crate::discovery::DiscoveryResponse, crate::discovery::Error> {
             Ok(crate::discovery::DiscoveryResponse {
                 package_manager: crate::package_manager::PackageManager::Npm,
