@@ -6,8 +6,8 @@ use rayon::prelude::*;
 use turbopath::{AbsoluteSystemPathBuf, AnchoredSystemPath, RelativeUnixPathBuf};
 use turborepo_repository::{
     discovery::PackageDiscoveryBuilder,
-    package_graph::{PackageGraph, WorkspaceInfo, WorkspaceName},
-    package_json::PackageJson,
+    package_graph::{self, PackageGraph, WorkspaceInfo, WorkspaceName},
+    package_json::{self, PackageJson},
     package_manager,
 };
 use turborepo_scm::SCM;
@@ -15,12 +15,13 @@ use turborepo_telemetry::events::generic::GenericEventBuilder;
 
 use super::task_id::TaskId;
 use crate::{
+    config,
     engine::{EngineBuilder, TaskNode},
     hash::FileHashes,
     run::error::Error,
     task_graph::TaskDefinition,
     task_hash::PackageInputsHashes,
-    turbo_json::TurboJson,
+    turbo_json::{self, TurboJson},
     DaemonClient,
 };
 
@@ -58,6 +59,16 @@ pub struct LocalPackageHasherBuilder<PDB: PackageDiscoveryBuilder + Sync> {
     pub scm: SCM,
 }
 
+#[derive(thiserror::Error, Debug)]
+pub enum LocalPackageHasherBuilderError {
+    #[error("package.json not found")]
+    MissingPackageJson(#[from] package_json::Error),
+    #[error("turbo.json not found")]
+    MissingTurboJson(#[from] config::Error),
+    #[error("unable to build package graph: {0}")]
+    PackageGraphError(#[from] package_graph::Error),
+}
+
 impl<PDB> PackageHasherBuilder for LocalPackageHasherBuilder<PDB>
 where
     PDB: PackageDiscoveryBuilder + Sync + Send,
@@ -65,26 +76,22 @@ where
     PDB::Error: Into<package_manager::Error>,
 {
     type Output = LocalPackageHashes;
-    type Error = std::convert::Infallible;
+    type Error = LocalPackageHasherBuilderError;
 
     async fn build(self) -> Result<Self::Output, Self::Error> {
         let package_json_path = self.repo_root.join_component("package.json");
-        let root_package_json = PackageJson::load(&package_json_path).unwrap();
+        let root_package_json = PackageJson::load(&package_json_path)?;
         let root_turbo_json = TurboJson::load(
             &self.repo_root,
             AnchoredSystemPath::empty(),
             &root_package_json,
             false,
-        )
-        .unwrap();
+        )?;
 
-        let pkg_dep_graph = {
-            PackageGraph::builder(&self.repo_root, root_package_json)
-                .with_package_discovery(self.discovery)
-                .build()
-                .await
-                .unwrap()
-        };
+        let pkg_dep_graph = PackageGraph::builder(&self.repo_root, root_package_json)
+            .with_package_discovery(self.discovery)
+            .build()
+            .await?;
 
         let engine = EngineBuilder::new(&self.repo_root, &pkg_dep_graph, false)
             .with_root_tasks(root_turbo_json.pipeline.keys().cloned())

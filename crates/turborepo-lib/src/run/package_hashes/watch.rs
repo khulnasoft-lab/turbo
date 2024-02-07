@@ -53,7 +53,17 @@ impl<PD, PH: PackageHasher + Send + Sync + 'static> WatchingPackageHasher<PD, PH
             let file_watching = file_watching.clone();
             let hashes_tx = hashes_tx.clone();
             async move {
-                let hasher = fallback.build().await.unwrap();
+                let hasher = match fallback.build().await {
+                    Ok(hasher) => hasher,
+                    Err(e) => {
+                        tracing::warn!(
+                            "unable to start up package hasher, as the fallback hasher failed to \
+                             start: {}",
+                            e
+                        );
+                        return;
+                    }
+                };
 
                 let data = hasher
                     .calculate_hashes(Default::default())
