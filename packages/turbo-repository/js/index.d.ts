@@ -29,4 +29,5 @@ export class Workspace {
   /** Finds and returns packages within the workspace. */
   findPackages(): Promise<Array<Package>>;
   findPackagesAndDependents(): Promise<Record<string, Array<string>>>;
+  changedPackages(files: Array<string>): Array<string>;
 }

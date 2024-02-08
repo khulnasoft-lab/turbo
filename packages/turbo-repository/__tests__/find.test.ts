@@ -1,6 +1,12 @@
 import * as path from "node:path";
 import { Workspace, Package, PackageManager } from "../js/dist/index.js";
 
+interface AffectedPackagesTestParams {
+  files: string[];
+  expected: string[];
+  description: string;
+}
+
 describe("Workspace", () => {
   it("finds a workspace", async () => {
     const workspace = await Workspace.find();
@@ -27,6 +33,24 @@ describe("Workspace", () => {
     expect(graph).toEqual({
       "apps/app": [],
       "packages/ui": ["apps/app"],
+    });
+  });
+
+  describe("affectedPackages", () => {
+    const tests: AffectedPackagesTestParams[] = [
+      {
+        files: ["app/file.txt"],
+        expected: ["apps/app"],
+        description: "app change",
+      },
+    ];
+
+    test.each(tests)("%s", async (testParams: AffectedPackagesTestParams) => {
+      const { files, expected } = testParams;
+      const dir = path.resolve(__dirname, "./fixtures/monorepo");
+      const workspace = await Workspace.find(dir);
+      const changedPackages = await workspace.changedPackages(files);
+      expect(changedPackages).toEqual(expected);
     });
   });
 });

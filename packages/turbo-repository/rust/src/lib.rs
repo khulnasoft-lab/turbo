@@ -129,4 +129,9 @@ impl Workspace {
 
         Ok(map)
     }
+
+    #[napi]
+    pub fn changed_packages(&self, files: Vec<String>) -> Vec<String> {
+        return vec![];
+    }
 }
