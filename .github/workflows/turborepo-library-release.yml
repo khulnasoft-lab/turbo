@@ -31,26 +31,13 @@ jobs:
               echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> $GITHUB_ENV
           - host: ubuntu-latest
             target: "x86_64-unknown-linux-gnu"
-            container: amazon/aws-lambda-nodejs:18
-            install: |
-              yum install -y gcc gcc-c++ git
-              curl https://sh.rustup.rs -sSf | bash -s -- -y
-              npm i -g pnpm@8.9.0
-            setup: |
-              pnpm install
           - host: windows-latest
             target: "aarch64-pc-windows-msvc"
           - host: windows-latest
             target: "x86_64-pc-windows-msvc"
 
     runs-on: ${{ matrix.settings.host }}
-    container:
-      image: ${{ matrix.settings.container }}
     steps:
-      - name: Install Packages
-        run: ${{ matrix.settings.install }}
-        if: ${{ matrix.settings.install }}
-
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -61,11 +48,9 @@ jobs:
         with:
           targets: ${{ matrix.settings.target }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
-        if: ${{ !matrix.settings.install }}
 
       - name: Setup Node
         uses: ./.github/actions/setup-node
-        if: ${{ !matrix.settings.install }}
 
       - name: Setup toolchain
         run: ${{ matrix.settings.setup }}
