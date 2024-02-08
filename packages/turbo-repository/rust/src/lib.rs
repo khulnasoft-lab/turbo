@@ -1,9 +1,13 @@
-use std::{collections::HashMap, hash::Hash};
+use std::{
+    collections::{HashMap, HashSet},
+    hash::Hash,
+};
 
 use napi::Error;
 use napi_derive::napi;
-use turbopath::AbsoluteSystemPath;
+use turbopath::{AbsoluteSystemPath, AnchoredSystemPathBuf};
 use turborepo_repository::{
+    change_mapper::{ChangeMapper, PackageChanges},
     inference::RepoState as WorkspaceState,
     package_graph::{PackageGraph, WorkspaceName, WorkspaceNode},
 };
@@ -131,7 +135,32 @@ impl Workspace {
     }
 
     #[napi]
-    pub fn changed_packages(&self, files: Vec<String>) -> Vec<String> {
-        return vec![];
+    pub async fn changed_packages(&self, files: Vec<String>) -> Result<Vec<String>, Error> {
+        let mapper = ChangeMapper::new(&self.graph, vec![], vec![]);
+
+        let hash_set_of_paths: HashSet<AnchoredSystemPathBuf> = files
+            .into_iter()
+            .map(|s| AnchoredSystemPathBuf::from(s)) // Convert each String to AnchoredSystemPathBuf
+            .collect();
+
+        let package_changes = match mapper.changed_packages(hash_set_of_paths, None) {
+            Ok(changes) => changes,
+            Err(e) => return Err(Error::from_reason(e.to_string())),
+        };
+
+        let packages = match package_changes {
+            PackageChanges::All => self
+                .find_packages()
+                .await
+                .unwrap_or_else(|_| vec![])
+                .into_iter()
+                .map(|p| p.name)
+                .collect::<Vec<String>>(),
+            PackageChanges::Some(packages) => {
+                packages.into_iter().map(|pkg| pkg).collect::<Vec<String>>()
+            }
+        };
+
+        Ok(packages)
     }
 }
