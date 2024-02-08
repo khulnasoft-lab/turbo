@@ -21,7 +21,7 @@ async fn basic_get() {
         });
 
 
-        let result = &*fetch(Vc::cell(server.url("/foo.woff")), Vc::cell(None)).await?;
+        let result = &*fetch(Vc::cell(server.url("/foo.woff")), Vc::cell(None), Vc::cell(None)).await?;
         resource_mock.assert();
 
         match result {
@@ -47,7 +47,7 @@ async fn sends_user_agent() {
                 .body("responsebody");
         });
 
-        let result = &*fetch(Vc::cell(server.url("/foo.woff")), Vc::cell(Some("foo".to_owned()))).await?;
+        let result = &*fetch(Vc::cell(server.url("/foo.woff"), Vc::cell(None)), Vc::cell(Some("foo".to_owned()))).await?;
         resource_mock.assert();
 
         let Ok(response) = result else {
@@ -104,7 +104,7 @@ async fn errors_on_failed_connection() {
         register();
 
         let url = "https://doesnotexist/foo.woff";
-        let result = &*fetch(Vc::cell(url.to_owned()), Vc::cell(None)).await?;
+        let result = &*fetch(Vc::cell(url.to_owned()), Vc::cell(None), Vc::cell(None)).await?;
         let Err(err_vc) = result else {
             panic!()
         };
@@ -126,7 +126,7 @@ async fn errors_on_404() {
 
         let server = httpmock::MockServer::start();
         let resource_url = server.url("/");
-        let result = &*fetch(Vc::cell(resource_url.clone()), Vc::cell(None)).await?;
+        let result = &*fetch(Vc::cell(resource_url.clone()), Vc::cell(None), Vc::cell(None)).await?;
         let Err(err_vc) = result else {
             panic!()
         };
