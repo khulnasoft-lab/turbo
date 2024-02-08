@@ -424,7 +424,7 @@ mod test {
     struct MockDiscovery;
     impl PackageDiscovery for MockDiscovery {
         async fn discover_packages(
-            &mut self,
+            &self,
         ) -> Result<crate::discovery::DiscoveryResponse, crate::discovery::Error> {
             Ok(crate::discovery::DiscoveryResponse {
                 package_manager: PackageManager::Npm,
