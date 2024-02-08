@@ -43,6 +43,21 @@ describe("Workspace", () => {
         expected: ["apps/app"],
         description: "app change",
       },
+      {
+        files: ["ui/a.txt"],
+        expected: ["packages/ui", "apps/app"],
+        description: "lib change",
+      },
+      {
+        files: ["package.json"],
+        expected: ["packages/ui", "apps/app"],
+        description: "global change",
+      },
+      {
+        files: ["README.md"],
+        expected: ["packages/ui", "apps/app"],
+        description: "global change that can be ignored",
+      },
     ];
 
     test.each(tests)("%s", async (testParams: AffectedPackagesTestParams) => {
