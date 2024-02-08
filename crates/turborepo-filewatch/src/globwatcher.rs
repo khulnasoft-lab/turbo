@@ -10,12 +10,12 @@ use notify::Event;
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::warn;
-use turbopath::{AbsoluteSystemPath, AbsoluteSystemPathBuf, RelativeUnixPath};
+use turbopath::{AbsoluteSystemPathBuf, RelativeUnixPath};
 use wax::{Any, Glob, Program};
 
 use crate::{
     cookies::{CookieError, CookieWatcher, CookieWriter, CookiedRequest},
-    NotifyError,
+    NotifyError, OptionalWatch,
 };
 
 type Hash = String;
@@ -146,16 +146,24 @@ struct GlobTracker {
 
 impl GlobWatcher {
     pub fn new(
-        root: &AbsoluteSystemPath,
+        root: AbsoluteSystemPathBuf,
         cookie_jar: CookieWriter,
-        recv: broadcast::Receiver<Result<Event, NotifyError>>,
+        mut recv: OptionalWatch<broadcast::Receiver<Result<Event, NotifyError>>>,
     ) -> Self {
         let (exit_ch, exit_signal) = tokio::sync::oneshot::channel();
         let (query_ch, query_recv) = mpsc::channel(256);
         let cookie_root = cookie_jar.root().to_owned();
-        tokio::task::spawn(
-            GlobTracker::new(root.to_owned(), cookie_root, exit_signal, recv, query_recv).watch(),
-        );
+        tokio::task::spawn(async move {
+            let Ok(recv) = recv.get().await else {
+                // if this fails, it means that the filewatcher is not available
+                // so starting the glob tracker is pointless
+                return;
+            }
+
+            GlobTracker::new(root, cookie_root, exit_signal, recv.resubscribe(), query_recv)
+                .watch()
+                .await
+        });
         Self {
             cookie_jar,
             _exit_ch: exit_ch,
@@ -455,9 +463,11 @@ mod test {
         let watcher = FileSystemWatcher::new_with_default_cookie_dir(&repo_root)
             .await
             .unwrap();
+        let recv = watcher.watch();
         let cookie_jar = CookieWriter::new(&cookie_dir, Duration::from_secs(2));
 
-        let glob_watcher = GlobWatcher::new(&repo_root, cookie_jar, watcher.subscribe());
+        let cookie_jar = CookieJar::new(&cookie_dir, Duration::from_secs(2), recv.clone());
+        let glob_watcher = GlobWatcher::new(repo_root.clone(), cookie_jar, recv);
 
         let raw_includes = &["my-pkg/dist/**", "my-pkg/.next/**"];
         let raw_excludes = ["my-pkg/.next/cache/**"];
@@ -539,9 +549,10 @@ mod test {
         let watcher = FileSystemWatcher::new_with_default_cookie_dir(&repo_root)
             .await
             .unwrap();
+        let recv = watcher.watch();
         let cookie_jar = CookieWriter::new(&cookie_dir, Duration::from_secs(2));
 
-        let glob_watcher = GlobWatcher::new(&repo_root, cookie_jar, watcher.subscribe());
+        let glob_watcher = GlobWatcher::new(repo_root.clone(), cookie_jar, recv);
 
         let raw_includes = &["my-pkg/dist/**", "my-pkg/.next/**"];
         let raw_excludes: [&str; 0] = [];
@@ -633,9 +644,10 @@ mod test {
         let watcher = FileSystemWatcher::new_with_default_cookie_dir(&repo_root)
             .await
             .unwrap();
+        let recv = watcher.watch();
         let cookie_jar = CookieWriter::new(&cookie_dir, Duration::from_secs(2));
 
-        let glob_watcher = GlobWatcher::new(&repo_root, cookie_jar, watcher.subscribe());
+        let glob_watcher = GlobWatcher::new(repo_root.clone(), cookie_jar, recv);
 
         // On windows, we expect different sanitization before the
         // globs are passed in, due to alternative data streams in files.

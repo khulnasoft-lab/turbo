@@ -15,8 +15,11 @@ dashmap = { workspace = true }
 futures = { version = "0.3.26" }
 itertools = { workspace = true }
 notify = "6.0.1"
+serde = { version = "1.0.190", features = ["derive"] }
+serde_json = "1.0.106"
 thiserror = "1.0.38"
 tokio = { workspace = true, features = ["full", "time"] }
+tokio-stream = "0.1.14"
 tracing = "0.1.37"
 tracing-test = "0.2.4"
 turbopath = { workspace = true }
@@ -36,6 +39,7 @@ version = "0.2.4"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
 tokio-scoped = "0.2.0"
 
 [features]
