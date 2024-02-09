@@ -39,33 +39,36 @@ describe("Workspace", () => {
   describe("affectedPackages", () => {
     const tests: AffectedPackagesTestParams[] = [
       {
-        files: ["app/file.txt"],
-        expected: ["apps/app"],
+        files: ["apps/app/file.txt"],
+        expected: ["app-a"],
         description: "app change",
       },
       {
-        files: ["ui/a.txt"],
-        expected: ["packages/ui", "apps/app"],
+        files: ["packages/ui/a.txt"],
+        expected: ["app-a", "ui"],
         description: "lib change",
       },
       {
         files: ["package.json"],
-        expected: ["packages/ui", "apps/app"],
+        expected: ["app-a", "ui"],
         description: "global change",
       },
       {
         files: ["README.md"],
-        expected: ["packages/ui", "apps/app"],
+        expected: [],
         description: "global change that can be ignored",
       },
     ];
 
-    test.each(tests)("%s", async (testParams: AffectedPackagesTestParams) => {
-      const { files, expected } = testParams;
-      const dir = path.resolve(__dirname, "./fixtures/monorepo");
-      const workspace = await Workspace.find(dir);
-      const changedPackages = await workspace.changedPackages(files);
-      expect(changedPackages).toEqual(expected);
-    });
+    test.each(tests)(
+      "$description",
+      async (testParams: AffectedPackagesTestParams) => {
+        const { files, expected } = testParams;
+        const dir = path.resolve(__dirname, "./fixtures/monorepo");
+        const workspace = await Workspace.find(dir);
+        const changedPackages = await workspace.changedPackages(files);
+        expect(changedPackages).toEqual(expected);
+      }
+    );
   });
 });

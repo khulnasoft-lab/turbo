@@ -138,9 +138,21 @@ impl Workspace {
     pub async fn changed_packages(&self, files: Vec<String>) -> Result<Vec<String>, Error> {
         let mapper = ChangeMapper::new(&self.graph, vec![], vec![]);
 
+        let workspace_root = match AbsoluteSystemPath::new(&self.absolute_path) {
+            Ok(path) => path,
+            Err(e) => return Err(Error::from_reason(e.to_string())),
+        };
+
         let hash_set_of_paths: HashSet<AnchoredSystemPathBuf> = files
             .into_iter()
-            .map(|s| AnchoredSystemPathBuf::from(s)) // Convert each String to AnchoredSystemPathBuf
+            .filter_map(|s| {
+                let split = s.split(std::path::MAIN_SEPARATOR).collect::<Vec<&str>>();
+                let xx = workspace_root.join_components(&split);
+                match workspace_root.anchor(&xx) {
+                    Ok(path) => Some(path),
+                    Err(e) => None,
+                }
+            })
             .collect();
 
         let package_changes = match mapper.changed_packages(hash_set_of_paths, None) {
@@ -148,7 +160,7 @@ impl Workspace {
             Err(e) => return Err(Error::from_reason(e.to_string())),
         };
 
-        let packages = match package_changes {
+        let mut packages = match package_changes {
             PackageChanges::All => self
                 .find_packages()
                 .await
@@ -156,10 +168,13 @@ impl Workspace {
                 .into_iter()
                 .map(|p| p.name)
                 .collect::<Vec<String>>(),
-            PackageChanges::Some(packages) => {
-                packages.into_iter().map(|pkg| pkg).collect::<Vec<String>>()
-            }
+            PackageChanges::Some(packages) => packages
+                .into_iter()
+                .map(|pkg| String::from(pkg))
+                .collect::<Vec<String>>(),
         };
+
+        packages.sort();
 
         Ok(packages)
     }
